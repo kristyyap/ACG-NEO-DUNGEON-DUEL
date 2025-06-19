@@ -147,6 +147,26 @@ function updateHealthBar() {
 }
 updateHealthBar();
 
+// Game Duration - Timer
+let gameDuration = 120; // seconds
+let gameTimeLeft = gameDuration; // seconds
+let timerDisplay = document.createElement("div");
+timerDisplay.style.position = "absolute";
+timerDisplay.style.top = "20px";
+timerDisplay.style.right = "32px";
+timerDisplay.style.background = "rgba(0,0,0,0.6)";
+timerDisplay.style.color = "#FFF";
+timerDisplay.style.fontWeight = "bold";
+timerDisplay.style.fontSize = "22px";
+timerDisplay.style.padding = "6px 18px";
+timerDisplay.style.borderRadius = "14px";
+timerDisplay.style.zIndex = "500";
+timerDisplay.style.letterSpacing = "2px";
+timerDisplay.style.textShadow = "0 2px 10px #000";
+timerDisplay.innerText = "Time: 120";
+document.body.appendChild(timerDisplay);
+let gameEnded = false;
+
 // ─────────────────────────────────────────────────────────
 // 3) HELPER — capsule-like AABB for the player
 // ─────────────────────────────────────────────────────────
@@ -560,6 +580,18 @@ function init() {
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("keyup", onKeyUp);
   addEventListener("resize", onWindowResize);
+
+  // set game time
+  setInterval(() => {
+    if (gameEnded) return;
+    if (playerLives <= 0) return;
+    gameTimeLeft--;
+    if (gameTimeLeft < 0) gameTimeLeft = 0;
+    timerDisplay.innerText = `Time: ${gameTimeLeft}`;
+    if (gameTimeLeft === 0 && !gameEnded) {
+      endGame("Time's up! Game Over");
+    }
+  }, 1000);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1223,7 +1255,7 @@ function animate() {
       //   }
       //   // Do not move the monster any farther; it’s “biting” now.
       // }
-      
+
       if (horizDist < CATCH_DIST) {
         // ─── “BITE” state ───────────────────
         if (m.current !== m.biteIndex) {
@@ -1241,7 +1273,7 @@ function animate() {
             playerLives--;
             updateHealthBar();
             showPopup("Attacked!");
-            if (playerLives === 0) {
+            if (playerLives === 0 && !gameEnded) {
               showPopup("You Died! Game Over");
             }
           }
@@ -1349,4 +1381,15 @@ function onWindowResize() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+}
+
+// ─────────────────────────────────────────────────────────
+// 11) Game Over
+// ─────────────────────────────────────────────────────────
+function endGame(message) {
+  if (gameEnded) return;
+  gameEnded = true;
+  showPopup(message);
+  controls.unlock();  // unlock mouse to get back pointer
+  //  optional : lock controls, stop moving, restart button
 }
