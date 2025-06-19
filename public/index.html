@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Neo-Dungeon Duel (ES Module Version)</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+    #blocker {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #instructions {
+      font-size: 24px;
+      color: white;
+      text-align: center;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <!-- PointerLock “Click to Play” overlay -->
+  <div id="blocker">
+    <div id="instructions">
+      Click to Play<br />
+      (WASD = move, Mouse = look)
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+
+  <!-- Include the Socket.io client script (exposes `io()` globally) -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <!-- Load main.js as an ES Module -->
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
