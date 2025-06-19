@@ -117,6 +117,36 @@ treasureHint.style.zIndex = "150";
 treasureHint.innerText = "Press E to open treasure";
 document.body.appendChild(treasureHint);
 
+// Health Bar (3 lives for 1 player)
+let playerLives = 3;
+const maxLives = 3;
+// health bar
+let healthBar = document.createElement("div");
+healthBar.style.position = "absolute";
+healthBar.style.top = "20px";
+healthBar.style.left = "32px";
+healthBar.style.width = "120px";
+healthBar.style.height = "32px";
+healthBar.style.background = "rgba(0,0,0,0.6)";
+healthBar.style.borderRadius = "14px";
+healthBar.style.padding = "6px 18px";
+healthBar.style.fontSize = "22px";
+healthBar.style.fontWeight = "bold";
+healthBar.style.color = "#FF5555";
+healthBar.style.zIndex = "500";
+healthBar.style.letterSpacing = "2px";
+healthBar.style.textShadow = "0 2px 10px #000";
+document.body.appendChild(healthBar);
+
+function updateHealthBar() {
+  // 3 heart represent player's lives
+  let hearts = "";
+  for (let i = 0; i < playerLives; ++i) hearts += "❤️ ";
+  for (let i = playerLives; i < maxLives; ++i) hearts += "🤍 ";
+  healthBar.innerText = hearts.trim();
+}
+updateHealthBar();
+
 // ─────────────────────────────────────────────────────────
 // 3) HELPER — capsule-like AABB for the player
 // ─────────────────────────────────────────────────────────
@@ -799,11 +829,11 @@ function openTreasure(idx) {
   treasures[idx].visible = false; // hide the treasure
   const gold = 100; // random rewards (gold coins)
   goldCount += gold;
-  showRewardPopup(`You get: Gold x${gold}！`); // show reward
+  showPopup(`You get: Gold x${gold}！`); // show reward
   updateCoinDisplay();
 }
 
-function showRewardPopup(msg) {
+function showPopup(msg) {
   let popup = document.createElement("div");
   popup.style.position = "absolute";
   popup.style.left = "50%";
@@ -1042,7 +1072,7 @@ function animate() {
         nearestTreasureIndex = idx;
       }
     });
-    
+
     // Show hint or instruction on the treasure
     if (nearestTreasureIndex !== null) {
       const chest = treasures[nearestTreasureIndex];
@@ -1184,6 +1214,16 @@ function animate() {
       // 4) Decide “bite” vs “run” vs “idle” based on horizontal distance + LOS:
       const CATCH_DIST = 0.9; // horizontal meters
 
+      // if (horizDist < CATCH_DIST) {
+      //   // ─── “BITE” state ───────────────────
+      //   if (m.current !== m.biteIndex) {
+      //     m.actions[m.current].fadeOut(0.2);
+      //     m.actions[m.biteIndex].reset().fadeIn(0.2).play();
+      //     m.current = m.biteIndex;
+      //   }
+      //   // Do not move the monster any farther; it’s “biting” now.
+      // }
+      
       if (horizDist < CATCH_DIST) {
         // ─── “BITE” state ───────────────────
         if (m.current !== m.biteIndex) {
@@ -1191,7 +1231,21 @@ function animate() {
           m.actions[m.biteIndex].reset().fadeIn(0.2).play();
           m.current = m.biteIndex;
         }
-        // Do not move the monster any farther; it’s “biting” now.
+        // Attacked by monster
+        if (!m.lastAttackTime) m.lastAttackTime = 0;
+        const nowSec = now / 1000;
+        const attackCD = 1.0; // only 1 attack in 1 seconds
+        if (nowSec - m.lastAttackTime > attackCD) {
+          m.lastAttackTime = nowSec;
+          if (playerLives > 0) {
+            playerLives--;
+            updateHealthBar();
+            showPopup("Attacked!");
+            if (playerLives === 0) {
+              showPopup("You Died! Game Over");
+            }
+          }
+        }
       } else if (m.chasing) {
         // ─── “RUN” state (player seen but not in bite range) ─────────────────
         if (m.current !== m.runIndex) {
