@@ -120,6 +120,7 @@ document.body.appendChild(treasureHint);
 // Health Bar (3 lives for 1 player)
 let playerLives = 3;
 const maxLives = 3;
+let playerDead = false;
 // health bar
 let healthBar = document.createElement("div");
 healthBar.style.position = "absolute";
@@ -149,6 +150,8 @@ updateHealthBar();
 
 // Game Duration - Timer
 let gameDuration = 120; // seconds
+let gameTimerInterval = null;
+let timerRunning = false; // set is the timer counting down
 let gameTimeLeft = gameDuration; // seconds
 let timerDisplay = document.createElement("div");
 timerDisplay.style.position = "absolute";
@@ -166,6 +169,26 @@ timerDisplay.style.textShadow = "0 2px 10px #000";
 timerDisplay.innerText = "Time: 120";
 document.body.appendChild(timerDisplay);
 let gameEnded = false;
+
+function startGameTimer() {
+  if (timerRunning || gameEnded) return;
+  timerRunning = true;
+  gameTimerInterval = setInterval(() => {
+    if (gameEnded) return;
+    gameTimeLeft--;
+    if (gameTimeLeft < 0) gameTimeLeft = 0;
+    timerDisplay.innerText = `Time: ${gameTimeLeft}`;
+    if (gameTimeLeft === 0) {
+      endGame();
+    }
+  }, 1000);
+}
+
+function pauseGameTimer() {
+  timerRunning = false;
+  if (gameTimerInterval) clearInterval(gameTimerInterval);
+  gameTimerInterval = null;
+}
 
 // ─────────────────────────────────────────────────────────
 // 3) HELPER — capsule-like AABB for the player
@@ -217,10 +240,12 @@ function init() {
   controls.addEventListener("lock", () => {
     blocker.style.display = "none";
     instructions.style.display = "none";
+    startGameTimer();
   });
   controls.addEventListener("unlock", () => {
     blocker.style.display = "flex";
     instructions.style.display = "";
+    pauseGameTimer();
   });
 
   scene.add(controls.getObject());
@@ -580,18 +605,6 @@ function init() {
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("keyup", onKeyUp);
   addEventListener("resize", onWindowResize);
-
-  // set game time
-  setInterval(() => {
-    if (gameEnded) return;
-    if (playerLives <= 0) return;
-    gameTimeLeft--;
-    if (gameTimeLeft < 0) gameTimeLeft = 0;
-    timerDisplay.innerText = `Time: ${gameTimeLeft}`;
-    if (gameTimeLeft === 0 && !gameEnded) {
-      endGame("Time's up! Game Over");
-    }
-  }, 1000);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1033,6 +1046,7 @@ function addOtherPlayer({ id, slot, position, rotation = { y: 0 } }) {
 // 8) INPUT
 // ─────────────────────────────────────────────────────────
 function onKeyDown(e) {
+  if (playerDead) return;
   switch (e.code) {
     case "ArrowUp":
     case "KeyW":
@@ -1051,6 +1065,7 @@ function onKeyDown(e) {
       moveRight = true;
       break;
     case "KeyE":
+      if (playerDead) return;
       // open treasure
       if (
         nearestTreasureIndex !== null &&
@@ -1062,6 +1077,7 @@ function onKeyDown(e) {
   }
 }
 function onKeyUp(e) {
+  if (playerDead) return;
   switch (e.code) {
     case "ArrowUp":
     case "KeyW":
@@ -1092,6 +1108,21 @@ function animate() {
   const dt = (now - prevTime) / 1000; // seconds since last frame
 
   if (controls.isLocked) {
+    // is already game over
+    if (playerDead) {
+      // Optionally: Hide treasure hint when dead
+      treasureHint.style.display = "none";
+      // Optionally: Set animation to idle, or pause it
+      if (myAvatar && myAvatar.userData.action) {
+        const action = myAvatar.userData.action;
+        if (!action.paused) {
+          action.paused = true;
+          action.time = 0;
+        }
+      }
+      // Don't process any movement or actions
+      return;
+    }
     // Find the unopened treasure chest closest to the player
     nearestTreasureIndex = null;
     let minDist = 2.0; // Maximum interactive distance (meters)
@@ -1274,7 +1305,7 @@ function animate() {
             updateHealthBar();
             showPopup("Attacked!");
             if (playerLives === 0 && !gameEnded) {
-              showPopup("You Died! Game Over");
+              endGame();
             }
           }
         }
@@ -1384,12 +1415,33 @@ function onWindowResize() {
 }
 
 // ─────────────────────────────────────────────────────────
-// 11) Game Over
+// 11) Game Over (time's up // playerLives = 0)
 // ─────────────────────────────────────────────────────────
-function endGame(message) {
+function endGame() {
   if (gameEnded) return;
   gameEnded = true;
-  showPopup(message);
-  controls.unlock();  // unlock mouse to get back pointer
+  playerDead = true;
+  showDeathOverlay();
+  controls.unlock(); // unlock mouse to get back pointer
+  pauseGameTimer();
   //  optional : lock controls, stop moving, restart button
+}
+
+function showDeathOverlay() {
+  const overlay = document.createElement("div");
+  overlay.id = "deathOverlay";
+  overlay.style.position = "fixed";
+  overlay.style.left = 0;
+  overlay.style.top = 0;
+  overlay.style.width = "100vw";
+  overlay.style.height = "100vh";
+  overlay.style.background = "rgba(0,0,0,0.8)";
+  overlay.style.color = "#FFF";
+  overlay.style.fontSize = "60px";
+  overlay.style.display = "flex";
+  overlay.style.justifyContent = "center";
+  overlay.style.alignItems = "center";
+  overlay.style.zIndex = "2000";
+  overlay.innerText = "GAME OVER";
+  document.body.appendChild(overlay);
 }
