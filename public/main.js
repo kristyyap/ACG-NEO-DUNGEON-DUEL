@@ -7,6 +7,8 @@ import { PointerLockControls } from "https://unpkg.com/three@0.160.0/examples/js
 // Added for 3D model
 import { GLTFLoader } from "https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "https://unpkg.com/three@0.160.0/examples/jsm/utils/SkeletonUtils.js";
+import { DecalGeometry } from 'https://unpkg.com/three@0.160.0/examples/jsm/geometries/DecalGeometry.js';
+
 
 // socket.io is injected in index.html
 let socket;
@@ -55,6 +57,9 @@ const MONSTER_RADIUS = 0.4;
 const SPEED = 5; // m·s-1
 const playerHeight = 1.6; // eye height above floor
 const PLAYER_RADIUS = 0.4; // ★ NEW
+
+const listener   = new THREE.AudioListener();
+const audioLoader = new THREE.AudioLoader();
 
 let moveForward = false,
   moveBackward = false,
@@ -213,6 +218,45 @@ function onAvatarLoaded() {
   }
 }
 
+
+// ─── DRAGONBALL SPHERE SETUP ──────────────────────────────────
+// 1) Sphere geometry (smooth enough for decals)
+const dragonGeo = new THREE.SphereGeometry(0.5, 64, 64);
+
+// 2) Base material (the “orange” ball)
+const dragonMat = new THREE.MeshStandardMaterial({
+  color: 0xffc63f,
+  metalness: 0,
+  roughness: 0.7,
+});
+
+// 3) Load the seven-star decal texture (PNG with alpha!)
+new THREE.TextureLoader().load(
+  'textures/dragonball.png',
+  // onLoad callback:
+  (decalTex) => {
+    decalTex.minFilter = THREE.LinearMipMapLinearFilter;
+    decalTex.magFilter = THREE.LinearFilter;
+    decalTex.wrapS = decalTex.wrapT = THREE.ClampToEdgeWrapping;
+
+    // Now that the texture is ready, place your treasures
+    placeDragonBalls(decalTex);
+  },
+  undefined,
+  (err) => console.error("Failed to load dragonball.png:", err)
+);
+
+// // 4) Decal material (pushes it just above the sphere to avoid z-fighting)
+// const decalMat = new THREE.MeshBasicMaterial({
+//   map: decalTex,
+//   transparent: true,
+//   depthTest: true,
+//   depthWrite: false,
+//   polygonOffset: true,
+//   polygonOffsetFactor: -4,
+// });
+
+
 // ─────────────────────────────────────────────────────────
 // 4) MAIN SET-UP
 // ─────────────────────────────────────────────────────────
@@ -225,9 +269,44 @@ function init() {
   //scene.background = new THREE.Color(0x111111);
   scene.background = new THREE.Color(0x000000);
   scene.fog = new THREE.Fog(0x000000, 18, 40);
+  scene.userData.lastRaptorTime = 0;
 
   camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 300);
   renderer = new THREE.WebGLRenderer({ antialias: true });
+
+  camera.add( listener );
+
+  // 2️⃣ Background music (non‐positional, plays in loop)
+  const bgm = new THREE.Audio( listener );
+  audioLoader.load( 'sounds/bgm.mp3', buffer => {
+    bgm.setBuffer( buffer );
+    bgm.setLoop( true );
+    bgm.setVolume( 0.3 );
+    bgm.play();
+  });
+  // store for later if you need to pause/stop
+  scene.userData.bgm = bgm;
+
+  const walkSound = new THREE.Audio( listener );
+  audioLoader.load( 'sounds/walking.mp3', buffer => {
+   walkSound.setBuffer( buffer );
+   walkSound.setLoop( true );
+   walkSound.setVolume( 1.2);
+   // don’t play yet
+ });
+ // store for later control
+ scene.userData.walkSound = walkSound;
+
+ const coinSound = new THREE.Audio( listener );
+  audioLoader.load( 'sounds/coin.mp3', buffer => {
+    coinSound.setBuffer( buffer );
+    coinSound.setLoop( false );
+    coinSound.setVolume( 1.0 );
+  });
+  scene.userData.coinSound = coinSound;
+    
+  renderer.shadowMap.enabled = true;                           // enable shadow maps
+  renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
   renderer.setSize(innerWidth, innerHeight);
   document.body.appendChild(renderer.domElement);
 
@@ -238,11 +317,15 @@ function init() {
 
   instructions.addEventListener("click", () => controls.lock());
   controls.addEventListener("lock", () => {
+    const bgm = scene.userData.bgm;
+    if (bgm && !bgm.isPlaying) bgm.play();
     blocker.style.display = "none";
     instructions.style.display = "none";
     startGameTimer();
   });
   controls.addEventListener("unlock", () => {
+    const bgm = scene.userData.bgm;
+    if (bgm && bgm.isPlaying) bgm.stop();
     blocker.style.display = "flex";
     instructions.style.display = "";
     pauseGameTimer();
@@ -272,7 +355,13 @@ function init() {
   ); // decay (phys-correct)
 
   torch.castShadow = true; // optional, costs a bit of GPU
+  torch.angle = Math.PI / 3; 
+  torch.shadow.camera.near = 0.2;   
+  torch.shadow.camera.far  = 40;  
+  torch.shadow.camera.updateProjectionMatrix();
   torch.shadow.bias = -0.0003; // reduce acne
+  torch.shadow.mapSize.width  = 2048;    // increase for crisper shadows
+  torch.shadow.mapSize.height = 2048;
   torch.shadow.mapSize.set(512, 512);
 
   scene.add(torch);
@@ -595,7 +684,7 @@ function init() {
     (err) => console.error("Error loading avatar4 GLTF:", err)
   );
 
-  placeTreasures(texLoader);
+  //placeTreasures(texLoader);
   console.log("treasures:", treasures);
 
   // multiplayer
@@ -695,6 +784,8 @@ function buildDungeonGeometry(wallMat, floorMat) {
           wallMat
         );
         wall.position.set(worldX, wallH / 2, worldZ);
+        wall.receiveShadow = true;
+        wall.castShadow    = false;
         scene.add(wall);
         objects.push(wall);
 
@@ -708,6 +799,7 @@ function buildDungeonGeometry(wallMat, floorMat) {
         const floor = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), floorMat);
         floor.rotation.x = -Math.PI / 2;
         floor.position.set(worldX, 0, worldZ);
+        floor.receiveShadow = true;   
         scene.add(floor);
       }
     }
@@ -737,6 +829,12 @@ function placeMonsters() {
   monsterSpots.forEach((cell) => {
     // Clone the loaded glTF (use SkeletonUtils for skinned meshes)
     const monsterClone = SkeletonUtils.clone(monsterGLTF);
+    monsterClone.traverse(node => {
+      if (node.isMesh) {
+        node.castShadow    = true;   // dino throws a shadow
+        node.receiveShadow = true;   // optional: dino can receive shadows
+      }
+    });
 
     // Compute world‐coordinates
     const x = (cell.c - half) * 2;
@@ -744,22 +842,21 @@ function placeMonsters() {
     monsterClone.position.set(x, 0, z);
     monsterClone.scale.set(1.0, 1.0, 1.0); // adjust monster sizes
 
+    // ─── attach a positional “trex” roar sound to this clone
+    const roar = new THREE.PositionalAudio( listener );
+    audioLoader.load( 'sounds/trex.mp3', buffer => {
+      roar.setBuffer( buffer );
+      roar.setRefDistance( 8 );     // how quickly it falls off
+      roar.setVolume( 1.0 );
+    });
+    monsterClone.add( roar );
+
     // Add clone to the scene:
     scene.add(monsterClone);
     const monsterBox = new THREE.Box3()
       .setFromObject(monsterClone)
       .expandByScalar(0.05);
 
-    // If the original glTF had animations, make a fresh mixer for this clone
-    // let mixerClone = null;
-    // if (monsterMixer) {
-    //   mixerClone = new THREE.AnimationMixer(monsterClone);
-    //   monsterMixer._actions.forEach(origAction => {
-    //     const clip = origAction.getClip();
-    //     const actionClone = mixerClone.clipAction(clip, monsterClone);
-    //     actionClone.play();
-    //   });
-    // }
 
     const mixerClone = new THREE.AnimationMixer(monsterClone);
 
@@ -778,6 +875,7 @@ function placeMonsters() {
     // Store each monster’s data for AI & collision:
     monsters.push({
       mesh: monsterClone,
+      roar: roar,
       mixer: mixerClone,
       actions: actions, // <-- store the array of AnimationActions
       current: idleIndex, // <-- index of the clip currently playing
@@ -796,56 +894,6 @@ function placeMonsters() {
   });
 }
 
-// function placeMonsters(loader) {
-
-//   if (monsterSpots.length === 0) {
-//     console.warn("No 'M' tiles in FIXED_LAYOUT – no monsters spawned.");
-//     return;
-//   }
-
-//   const tex  = loader.load('textures/monster.jpeg');
-//   const half = DUNGEON_SIZE >> 1;
-
-//   monsterSpots.forEach(cell => {
-//     /* sprite */
-//     const mat    = new THREE.SpriteMaterial({ map: tex, transparent: true });
-//     const sprite = new THREE.Sprite(mat);
-//     sprite.scale.set(1, 1, 1);
-//     sprite.center.set(0.5, 0);          // bottom-anchored
-
-//     /* world position */
-//     const x = (cell.c - half) * 2;
-//     const z = (cell.r - half) * 2;
-//     sprite.position.set(x, 0, z);
-//     scene.add(sprite);
-
-//     monsters.push({
-//       sprite,
-//       position: new THREE.Vector3(x, 0, z),
-//       velocity : new THREE.Vector3(),   // will point toward the player
-//         chasing  : false,
-//         visible  : true
-//     });
-//   });
-// }
-
-// function placeMonster(loader) {
-//   // choose random floor cell
-//   const floors = [];
-//   for (let r = 0; r < DUNGEON_SIZE; r++)
-//     for (let c = 0; c < DUNGEON_SIZE; c++)
-//       if (dungeonMap[r][c] === 1) floors.push({ r, c });
-//   const cell = floors[Math.random() * floors.length | 0];
-//   const half = DUNGEON_SIZE >> 1;
-//   monsterPosition.set((cell.c - half) * 2, 1, (cell.r - half) * 2);
-
-//   const spriteMat = new THREE.SpriteMaterial({ map: loader.load('textures/monster.jpeg') });
-//   monsterSprite = new THREE.Sprite(spriteMat);
-//   monsterSprite.scale.set(1, 1, 1);
-//   monsterSprite.position.copy(monsterPosition);
-//   scene.add(monsterSprite);
-// }
-
 /* 6½)  TREASURE SETUP ─────────────────────────────────── */
 function placeTreasures(loader) {
   if (treasureSpots.length === 0) {
@@ -853,23 +901,83 @@ function placeTreasures(loader) {
     return;
   }
 
-  const tex = loader.load("textures/tres.png"); // or .jpg
-  const geo = new THREE.BoxGeometry(1, 1, 1);
-  const mat = new THREE.MeshPhongMaterial({ map: tex, shininess: 10 });
+  // const tex = loader.load("textures/tres.png"); // or .jpg
+  // const geo = new THREE.BoxGeometry(1, 1, 1);
+  // const mat = new THREE.MeshPhongMaterial({ map: tex, shininess: 10 });
+  // const half = DUNGEON_SIZE >> 1;
+
+  // treasureSpots.forEach((cell) => {
+  //   const mesh = new THREE.Mesh(geo, mat.clone()); // clone so each can tint later
+  //   const x = (cell.c - half) * 2;
+  //   const z = (cell.r - half) * 2;
+  //   mesh.position.set(x, 0.5, z); // sits on the floor
+  //   scene.add(mesh);
+
+  //   treasures.push(mesh);
+  // });
+
+
   const half = DUNGEON_SIZE >> 1;
 
-  treasureSpots.forEach((cell) => {
-    const mesh = new THREE.Mesh(geo, mat.clone()); // clone so each can tint later
+  treasureSpots.forEach((cell, idx) => {
+    // 1) Orange sphere
+    const sphere = new THREE.Mesh(dragonGeo, dragonMat.clone());
     const x = (cell.c - half) * 2;
     const z = (cell.r - half) * 2;
-    mesh.position.set(x, 0.5, z); // sits on the floor
-    scene.add(mesh);
+    sphere.position.set(x, 0.5, z);
+    scene.add(sphere);
 
-    treasures.push(mesh);
+    // 2) Decal projection on the “front” of the sphere:
+    const position   = new THREE.Vector3(x, 0.5, z + 0.45); // just in front
+    const orientation= new THREE.Euler(0, 0, 0);
+    const size       = new THREE.Vector3(0.8, 0.8, 0.8);
+    const decalGeo   = new DecalGeometry(sphere, position, orientation, size);
+    const decalMesh  = new THREE.Mesh(decalGeo, decalMat);
+    scene.add(decalMesh);
+
+    treasures.push(sphere);
+  });
+
+}
+
+function placeDragonBalls(decalTex) {
+ const tex = new THREE.TextureLoader().load('textures/dragonball.png');
+  tex.minFilter = THREE.LinearMipMapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+
+  treasureSpots.forEach(cell => {
+    const sphere = new THREE.Mesh(
+      dragonGeo,
+      new THREE.MeshStandardMaterial({
+        map: tex,           // ← apply your PNG as the color map
+        metalness: 0,
+        roughness: 0.7,
+      })
+    );
+    sphere.position.set(
+      (cell.c - DUNGEON_SIZE/2|0)*2,
+      0.5,
+      (cell.r - DUNGEON_SIZE/2|0)*2
+    );
+     sphere.rotation.set(
+      Math.PI / 2,   // 45° around X
+      Math.PI / 2,   // 90° around Y
+      0              // 0° around Z
+    );
+    sphere.castShadow    = true;
+    sphere.receiveShadow = true; 
+
+    scene.add(sphere);
+    treasures.push(sphere);
   });
 }
 
+
 function openTreasure(idx) {
+  const coin = scene.userData.coinSound;
+  if (coin) coin.play();
+
   openedTreasures.add(idx); // mark as opened
   treasures[idx].visible = false; // hide the treasure
   const gold = 100; // random rewards (gold coins)
@@ -1169,6 +1277,24 @@ function animate() {
             .applyQuaternion(camera.quaternion)
         : new THREE.Vector3();
 
+    const walk = scene.userData.walkSound;
+    if ( movement.lengthSq() > 0 ) {
+      if (walk && !walk.isPlaying) walk.play();
+      const nowSec = performance.now() / 1000;
+      // every 5–15 seconds randomly
+      if ( nowSec - scene.userData.lastRaptorTime > 5 + Math.random()*10 ) {
+        scene.userData.lastRaptorTime = nowSec;
+        const r = new THREE.Audio( listener );
+        audioLoader.load( 'sounds/raptor.mp3', buf => {
+          r.setBuffer( buf );
+          r.setVolume( 0.8 );
+          r.play();
+        });
+      }
+    }else{
+      if (walk && walk.isPlaying) walk.stop();
+    }
+
     /* 9.2 Capsule-vs-AABB collision -------------------------------------- */
     const curr = controls.getObject().position.clone();
     const cand = curr.clone().add(movement);
@@ -1274,18 +1400,15 @@ function animate() {
       }
       m.chasing = canSee;
 
+      const wasChasing = m._wasChasing || false;
+      if ( !wasChasing && m.chasing ) {
+        // just flipped from not‐chasing to chasing
+        if ( m.roar.isPlaying === false ) m.roar.play();
+      }
+      m._wasChasing = m.chasing;
+
       // 4) Decide “bite” vs “run” vs “idle” based on horizontal distance + LOS:
       const CATCH_DIST = 0.9; // horizontal meters
-
-      // if (horizDist < CATCH_DIST) {
-      //   // ─── “BITE” state ───────────────────
-      //   if (m.current !== m.biteIndex) {
-      //     m.actions[m.current].fadeOut(0.2);
-      //     m.actions[m.biteIndex].reset().fadeIn(0.2).play();
-      //     m.current = m.biteIndex;
-      //   }
-      //   // Do not move the monster any farther; it’s “biting” now.
-      // }
 
       if (horizDist < CATCH_DIST) {
         // ─── “BITE” state ───────────────────
