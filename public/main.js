@@ -7,6 +7,7 @@ import { PointerLockControls } from "https://unpkg.com/three@0.160.0/examples/js
 // Added for 3D model
 import { GLTFLoader } from "https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "https://unpkg.com/three@0.160.0/examples/jsm/utils/SkeletonUtils.js";
+import { DecalGeometry } from "https://unpkg.com/three@0.160.0/examples/jsm/geometries/DecalGeometry.js";
 
 // socket.io is injected in index.html
 let socket;
@@ -55,6 +56,9 @@ const MONSTER_RADIUS = 0.4;
 const SPEED = 5; // m·s-1
 const playerHeight = 1.6; // eye height above floor
 const PLAYER_RADIUS = 0.4; // ★ NEW
+
+const listener = new THREE.AudioListener();
+const audioLoader = new THREE.AudioLoader();
 
 let moveForward = false,
   moveBackward = false,
@@ -120,6 +124,7 @@ document.body.appendChild(treasureHint);
 // Health Bar (3 lives for 1 player)
 let playerLives = 3;
 const maxLives = 3;
+let playerDead = false;
 // health bar
 let healthBar = document.createElement("div");
 healthBar.style.position = "absolute";
@@ -147,6 +152,48 @@ function updateHealthBar() {
 }
 updateHealthBar();
 
+// Game Duration - Timer
+let gameDuration = 120; // seconds
+let gameTimerInterval = null;
+let timerRunning = false; // set is the timer counting down
+let gameTimeLeft = gameDuration; // seconds
+let timerDisplay = document.createElement("div");
+timerDisplay.style.position = "absolute";
+timerDisplay.style.top = "20px";
+timerDisplay.style.right = "32px";
+timerDisplay.style.background = "rgba(0,0,0,0.6)";
+timerDisplay.style.color = "#FFF";
+timerDisplay.style.fontWeight = "bold";
+timerDisplay.style.fontSize = "22px";
+timerDisplay.style.padding = "6px 18px";
+timerDisplay.style.borderRadius = "14px";
+timerDisplay.style.zIndex = "500";
+timerDisplay.style.letterSpacing = "2px";
+timerDisplay.style.textShadow = "0 2px 10px #000";
+timerDisplay.innerText = "Time: 120";
+document.body.appendChild(timerDisplay);
+let gameEnded = false;
+
+function startGameTimer() {
+  if (timerRunning || gameEnded) return;
+  timerRunning = true;
+  gameTimerInterval = setInterval(() => {
+    if (gameEnded) return;
+    gameTimeLeft--;
+    if (gameTimeLeft < 0) gameTimeLeft = 0;
+    timerDisplay.innerText = `Time: ${gameTimeLeft}`;
+    if (gameTimeLeft === 0) {
+      endGame(true);
+    }
+  }, 1000);
+}
+
+function pauseGameTimer() {
+  timerRunning = false;
+  if (gameTimerInterval) clearInterval(gameTimerInterval);
+  gameTimerInterval = null;
+}
+
 // ─────────────────────────────────────────────────────────
 // 3) HELPER — capsule-like AABB for the player
 // ─────────────────────────────────────────────────────────
@@ -170,6 +217,43 @@ function onAvatarLoaded() {
   }
 }
 
+// ─── DRAGONBALL SPHERE SETUP ──────────────────────────────────
+// 1) Sphere geometry (smooth enough for decals)
+const dragonGeo = new THREE.SphereGeometry(0.5, 64, 64);
+
+// 2) Base material (the “orange” ball)
+const dragonMat = new THREE.MeshStandardMaterial({
+  color: 0xffc63f,
+  metalness: 0,
+  roughness: 0.7,
+});
+
+// 3) Load the seven-star decal texture (PNG with alpha!)
+new THREE.TextureLoader().load(
+  "textures/dragonball.png",
+  // onLoad callback:
+  (decalTex) => {
+    decalTex.minFilter = THREE.LinearMipMapLinearFilter;
+    decalTex.magFilter = THREE.LinearFilter;
+    decalTex.wrapS = decalTex.wrapT = THREE.ClampToEdgeWrapping;
+
+    // Now that the texture is ready, place your treasures
+    placeDragonBalls(decalTex);
+  },
+  undefined,
+  (err) => console.error("Failed to load dragonball.png:", err)
+);
+
+// // 4) Decal material (pushes it just above the sphere to avoid z-fighting)
+// const decalMat = new THREE.MeshBasicMaterial({
+//   map: decalTex,
+//   transparent: true,
+//   depthTest: true,
+//   depthWrite: false,
+//   polygonOffset: true,
+//   polygonOffsetFactor: -4,
+// });
+
 // ─────────────────────────────────────────────────────────
 // 4) MAIN SET-UP
 // ─────────────────────────────────────────────────────────
@@ -182,9 +266,44 @@ function init() {
   //scene.background = new THREE.Color(0x111111);
   scene.background = new THREE.Color(0x000000);
   scene.fog = new THREE.Fog(0x000000, 18, 40);
+  scene.userData.lastRaptorTime = 0;
 
   camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 300);
   renderer = new THREE.WebGLRenderer({ antialias: true });
+
+  camera.add(listener);
+
+  // 2️⃣ Background music (non‐positional, plays in loop)
+  const bgm = new THREE.Audio(listener);
+  audioLoader.load("sounds/bgm.mp3", (buffer) => {
+    bgm.setBuffer(buffer);
+    bgm.setLoop(true);
+    bgm.setVolume(0.3);
+    bgm.play();
+  });
+  // store for later if you need to pause/stop
+  scene.userData.bgm = bgm;
+
+  const walkSound = new THREE.Audio(listener);
+  audioLoader.load("sounds/walking.mp3", (buffer) => {
+    walkSound.setBuffer(buffer);
+    walkSound.setLoop(true);
+    walkSound.setVolume(1.2);
+    // don’t play yet
+  });
+  // store for later control
+  scene.userData.walkSound = walkSound;
+
+  const coinSound = new THREE.Audio(listener);
+  audioLoader.load("sounds/coin.mp3", (buffer) => {
+    coinSound.setBuffer(buffer);
+    coinSound.setLoop(false);
+    coinSound.setVolume(1.0);
+  });
+  scene.userData.coinSound = coinSound;
+
+  renderer.shadowMap.enabled = true; // enable shadow maps
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.setSize(innerWidth, innerHeight);
   document.body.appendChild(renderer.domElement);
 
@@ -195,12 +314,18 @@ function init() {
 
   instructions.addEventListener("click", () => controls.lock());
   controls.addEventListener("lock", () => {
+    const bgm = scene.userData.bgm;
+    if (bgm && !bgm.isPlaying) bgm.play();
     blocker.style.display = "none";
     instructions.style.display = "none";
+    startGameTimer();
   });
   controls.addEventListener("unlock", () => {
+    const bgm = scene.userData.bgm;
+    if (bgm && bgm.isPlaying) bgm.stop();
     blocker.style.display = "flex";
     instructions.style.display = "";
+    pauseGameTimer();
   });
 
   scene.add(controls.getObject());
@@ -227,7 +352,13 @@ function init() {
   ); // decay (phys-correct)
 
   torch.castShadow = true; // optional, costs a bit of GPU
+  torch.angle = Math.PI / 3;
+  torch.shadow.camera.near = 0.2;
+  torch.shadow.camera.far = 40;
+  torch.shadow.camera.updateProjectionMatrix();
   torch.shadow.bias = -0.0003; // reduce acne
+  torch.shadow.mapSize.width = 2048; // increase for crisper shadows
+  torch.shadow.mapSize.height = 2048;
   torch.shadow.mapSize.set(512, 512);
 
   scene.add(torch);
@@ -550,7 +681,7 @@ function init() {
     (err) => console.error("Error loading avatar4 GLTF:", err)
   );
 
-  placeTreasures(texLoader);
+  //placeTreasures(texLoader);
   console.log("treasures:", treasures);
 
   // multiplayer
@@ -650,6 +781,8 @@ function buildDungeonGeometry(wallMat, floorMat) {
           wallMat
         );
         wall.position.set(worldX, wallH / 2, worldZ);
+        wall.receiveShadow = true;
+        wall.castShadow = false;
         scene.add(wall);
         objects.push(wall);
 
@@ -663,6 +796,7 @@ function buildDungeonGeometry(wallMat, floorMat) {
         const floor = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), floorMat);
         floor.rotation.x = -Math.PI / 2;
         floor.position.set(worldX, 0, worldZ);
+        floor.receiveShadow = true;
         scene.add(floor);
       }
     }
@@ -692,6 +826,12 @@ function placeMonsters() {
   monsterSpots.forEach((cell) => {
     // Clone the loaded glTF (use SkeletonUtils for skinned meshes)
     const monsterClone = SkeletonUtils.clone(monsterGLTF);
+    monsterClone.traverse((node) => {
+      if (node.isMesh) {
+        node.castShadow = true; // dino throws a shadow
+        node.receiveShadow = true; // optional: dino can receive shadows
+      }
+    });
 
     // Compute world‐coordinates
     const x = (cell.c - half) * 2;
@@ -699,22 +839,20 @@ function placeMonsters() {
     monsterClone.position.set(x, 0, z);
     monsterClone.scale.set(1.0, 1.0, 1.0); // adjust monster sizes
 
+    // ─── attach a positional “trex” roar sound to this clone
+    const roar = new THREE.PositionalAudio(listener);
+    audioLoader.load("sounds/trex.mp3", (buffer) => {
+      roar.setBuffer(buffer);
+      roar.setRefDistance(8); // how quickly it falls off
+      roar.setVolume(1.0);
+    });
+    monsterClone.add(roar);
+
     // Add clone to the scene:
     scene.add(monsterClone);
     const monsterBox = new THREE.Box3()
       .setFromObject(monsterClone)
       .expandByScalar(0.05);
-
-    // If the original glTF had animations, make a fresh mixer for this clone
-    // let mixerClone = null;
-    // if (monsterMixer) {
-    //   mixerClone = new THREE.AnimationMixer(monsterClone);
-    //   monsterMixer._actions.forEach(origAction => {
-    //     const clip = origAction.getClip();
-    //     const actionClone = mixerClone.clipAction(clip, monsterClone);
-    //     actionClone.play();
-    //   });
-    // }
 
     const mixerClone = new THREE.AnimationMixer(monsterClone);
 
@@ -733,6 +871,7 @@ function placeMonsters() {
     // Store each monster’s data for AI & collision:
     monsters.push({
       mesh: monsterClone,
+      roar: roar,
       mixer: mixerClone,
       actions: actions, // <-- store the array of AnimationActions
       current: idleIndex, // <-- index of the clip currently playing
@@ -751,56 +890,6 @@ function placeMonsters() {
   });
 }
 
-// function placeMonsters(loader) {
-
-//   if (monsterSpots.length === 0) {
-//     console.warn("No 'M' tiles in FIXED_LAYOUT – no monsters spawned.");
-//     return;
-//   }
-
-//   const tex  = loader.load('textures/monster.jpeg');
-//   const half = DUNGEON_SIZE >> 1;
-
-//   monsterSpots.forEach(cell => {
-//     /* sprite */
-//     const mat    = new THREE.SpriteMaterial({ map: tex, transparent: true });
-//     const sprite = new THREE.Sprite(mat);
-//     sprite.scale.set(1, 1, 1);
-//     sprite.center.set(0.5, 0);          // bottom-anchored
-
-//     /* world position */
-//     const x = (cell.c - half) * 2;
-//     const z = (cell.r - half) * 2;
-//     sprite.position.set(x, 0, z);
-//     scene.add(sprite);
-
-//     monsters.push({
-//       sprite,
-//       position: new THREE.Vector3(x, 0, z),
-//       velocity : new THREE.Vector3(),   // will point toward the player
-//         chasing  : false,
-//         visible  : true
-//     });
-//   });
-// }
-
-// function placeMonster(loader) {
-//   // choose random floor cell
-//   const floors = [];
-//   for (let r = 0; r < DUNGEON_SIZE; r++)
-//     for (let c = 0; c < DUNGEON_SIZE; c++)
-//       if (dungeonMap[r][c] === 1) floors.push({ r, c });
-//   const cell = floors[Math.random() * floors.length | 0];
-//   const half = DUNGEON_SIZE >> 1;
-//   monsterPosition.set((cell.c - half) * 2, 1, (cell.r - half) * 2);
-
-//   const spriteMat = new THREE.SpriteMaterial({ map: loader.load('textures/monster.jpeg') });
-//   monsterSprite = new THREE.Sprite(spriteMat);
-//   monsterSprite.scale.set(1, 1, 1);
-//   monsterSprite.position.copy(monsterPosition);
-//   scene.add(monsterSprite);
-// }
-
 /* 6½)  TREASURE SETUP ─────────────────────────────────── */
 function placeTreasures(loader) {
   if (treasureSpots.length === 0) {
@@ -808,28 +897,89 @@ function placeTreasures(loader) {
     return;
   }
 
-  const tex = loader.load("textures/tres.png"); // or .jpg
-  const geo = new THREE.BoxGeometry(1, 1, 1);
-  const mat = new THREE.MeshPhongMaterial({ map: tex, shininess: 10 });
+  // const tex = loader.load("textures/tres.png"); // or .jpg
+  // const geo = new THREE.BoxGeometry(1, 1, 1);
+  // const mat = new THREE.MeshPhongMaterial({ map: tex, shininess: 10 });
+  // const half = DUNGEON_SIZE >> 1;
+
+  // treasureSpots.forEach((cell) => {
+  //   const mesh = new THREE.Mesh(geo, mat.clone()); // clone so each can tint later
+  //   const x = (cell.c - half) * 2;
+  //   const z = (cell.r - half) * 2;
+  //   mesh.position.set(x, 0.5, z); // sits on the floor
+  //   scene.add(mesh);
+
+  //   treasures.push(mesh);
+  // });
+
   const half = DUNGEON_SIZE >> 1;
 
-  treasureSpots.forEach((cell) => {
-    const mesh = new THREE.Mesh(geo, mat.clone()); // clone so each can tint later
+  treasureSpots.forEach((cell, idx) => {
+    // 1) Orange sphere
+    const sphere = new THREE.Mesh(dragonGeo, dragonMat.clone());
     const x = (cell.c - half) * 2;
     const z = (cell.r - half) * 2;
-    mesh.position.set(x, 0.5, z); // sits on the floor
-    scene.add(mesh);
+    sphere.position.set(x, 0.5, z);
+    scene.add(sphere);
 
-    treasures.push(mesh);
+    // 2) Decal projection on the “front” of the sphere:
+    const position = new THREE.Vector3(x, 0.5, z + 0.45); // just in front
+    const orientation = new THREE.Euler(0, 0, 0);
+    const size = new THREE.Vector3(0.8, 0.8, 0.8);
+    const decalGeo = new DecalGeometry(sphere, position, orientation, size);
+    const decalMesh = new THREE.Mesh(decalGeo, decalMat);
+    scene.add(decalMesh);
+
+    treasures.push(sphere);
+  });
+}
+
+function placeDragonBalls(decalTex) {
+  const tex = new THREE.TextureLoader().load("textures/dragonball.png");
+  tex.minFilter = THREE.LinearMipMapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+
+  treasureSpots.forEach((cell) => {
+    const sphere = new THREE.Mesh(
+      dragonGeo,
+      new THREE.MeshStandardMaterial({
+        map: tex, // ← apply your PNG as the color map
+        metalness: 0,
+        roughness: 0.7,
+      })
+    );
+    sphere.position.set(
+      ((cell.c - DUNGEON_SIZE / 2) | 0) * 2,
+      0.5,
+      ((cell.r - DUNGEON_SIZE / 2) | 0) * 2
+    );
+    sphere.rotation.set(
+      Math.PI / 2, // 45° around X
+      Math.PI / 2, // 90° around Y
+      0 // 0° around Z
+    );
+    sphere.castShadow = true;
+    sphere.receiveShadow = true;
+
+    scene.add(sphere);
+    treasures.push(sphere);
   });
 }
 
 function openTreasure(idx) {
+  const coin = scene.userData.coinSound;
+  if (coin) coin.play();
+
   openedTreasures.add(idx); // mark as opened
   treasures[idx].visible = false; // hide the treasure
   const gold = 100; // random rewards (gold coins)
   goldCount += gold;
   showPopup(`You get: Gold x${gold}！`); // show reward
+  updateCoinDisplay();
+
+  if (socket) socket.emit("goldChanged", goldCount);
+  showPopup(`You get: Gold x${gold}！`);
   updateCoinDisplay();
 }
 
@@ -950,6 +1100,10 @@ function initSocketConnection() {
   socket.on("roomFull", () => {
     alert("This dungeon already has four adventurers. Try again later!");
   });
+
+  socket.on("playersRanking", (playersInfo) => {
+    updateRanking(playersInfo);
+  });
 }
 
 // function addOtherPlayer(id, data) {
@@ -1001,6 +1155,7 @@ function addOtherPlayer({ id, slot, position, rotation = { y: 0 } }) {
 // 8) INPUT
 // ─────────────────────────────────────────────────────────
 function onKeyDown(e) {
+  if (playerDead) return;
   switch (e.code) {
     case "ArrowUp":
     case "KeyW":
@@ -1019,6 +1174,7 @@ function onKeyDown(e) {
       moveRight = true;
       break;
     case "KeyE":
+      if (playerDead) return;
       // open treasure
       if (
         nearestTreasureIndex !== null &&
@@ -1030,6 +1186,7 @@ function onKeyDown(e) {
   }
 }
 function onKeyUp(e) {
+  if (playerDead) return;
   switch (e.code) {
     case "ArrowUp":
     case "KeyW":
@@ -1060,6 +1217,21 @@ function animate() {
   const dt = (now - prevTime) / 1000; // seconds since last frame
 
   if (controls.isLocked) {
+    // is already game over
+    if (playerDead) {
+      // Optionally: Hide treasure hint when dead
+      treasureHint.style.display = "none";
+      // Optionally: Set animation to idle, or pause it
+      if (myAvatar && myAvatar.userData.action) {
+        const action = myAvatar.userData.action;
+        if (!action.paused) {
+          action.paused = true;
+          action.time = 0;
+        }
+      }
+      // Don't process any movement or actions
+      return;
+    }
     // Find the unopened treasure chest closest to the player
     nearestTreasureIndex = null;
     let minDist = 2.0; // Maximum interactive distance (meters)
@@ -1105,6 +1277,24 @@ function animate() {
             .multiplyScalar(SPEED * dt)
             .applyQuaternion(camera.quaternion)
         : new THREE.Vector3();
+
+    const walk = scene.userData.walkSound;
+    if (movement.lengthSq() > 0) {
+      if (walk && !walk.isPlaying) walk.play();
+      const nowSec = performance.now() / 1000;
+      // every 5–15 seconds randomly
+      if (nowSec - scene.userData.lastRaptorTime > 5 + Math.random() * 10) {
+        scene.userData.lastRaptorTime = nowSec;
+        const r = new THREE.Audio(listener);
+        audioLoader.load("sounds/raptor.mp3", (buf) => {
+          r.setBuffer(buf);
+          r.setVolume(0.8);
+          r.play();
+        });
+      }
+    } else {
+      if (walk && walk.isPlaying) walk.stop();
+    }
 
     /* 9.2 Capsule-vs-AABB collision -------------------------------------- */
     const curr = controls.getObject().position.clone();
@@ -1211,19 +1401,16 @@ function animate() {
       }
       m.chasing = canSee;
 
+      const wasChasing = m._wasChasing || false;
+      if (!wasChasing && m.chasing) {
+        // just flipped from not‐chasing to chasing
+        if (m.roar.isPlaying === false) m.roar.play();
+      }
+      m._wasChasing = m.chasing;
+
       // 4) Decide “bite” vs “run” vs “idle” based on horizontal distance + LOS:
       const CATCH_DIST = 0.9; // horizontal meters
 
-      // if (horizDist < CATCH_DIST) {
-      //   // ─── “BITE” state ───────────────────
-      //   if (m.current !== m.biteIndex) {
-      //     m.actions[m.current].fadeOut(0.2);
-      //     m.actions[m.biteIndex].reset().fadeIn(0.2).play();
-      //     m.current = m.biteIndex;
-      //   }
-      //   // Do not move the monster any farther; it’s “biting” now.
-      // }
-      
       if (horizDist < CATCH_DIST) {
         // ─── “BITE” state ───────────────────
         if (m.current !== m.biteIndex) {
@@ -1241,8 +1428,8 @@ function animate() {
             playerLives--;
             updateHealthBar();
             showPopup("Attacked!");
-            if (playerLives === 0) {
-              showPopup("You Died! Game Over");
+            if (playerLives === 0 && !gameEnded) {
+              endGame();
             }
           }
         }
@@ -1343,10 +1530,177 @@ function animate() {
 }
 
 // ─────────────────────────────────────────────────────────
-// 10) RESIZE
+// 10) PLAYER RANKING
+// ─────────────────────────────────────────────────────────
+// --- Add to your globals ---
+let rankingPanel = document.createElement("div");
+rankingPanel.style.position = "absolute";
+rankingPanel.style.right = "30px";
+rankingPanel.style.bottom = "30px";
+rankingPanel.style.background = "rgba(0,0,0,0.8)";
+rankingPanel.style.borderRadius = "12px";
+rankingPanel.style.padding = "18px 32px";
+rankingPanel.style.zIndex = "999";
+rankingPanel.style.color = "#fff";
+rankingPanel.style.minWidth = "260px";
+rankingPanel.style.fontSize = "18px";
+rankingPanel.innerHTML = "<b>🏆 Ranking</b><br/>";
+document.body.appendChild(rankingPanel);
+
+// --- Helper to update the ranking list ---
+function updateRanking(playersInfo) {
+  window.lastPlayersInfo = playersInfo.slice();
+  playersInfo.sort((a, b) => b.coins - a.coins);
+  rankingPanel.innerHTML = "<b>🏆 Ranking</b><br/><br/>";
+  // Sort by coins descending
+  playersInfo.sort((a, b) => b.coins - a.coins);
+  playersInfo.forEach((info, i) => {
+    // Use a character icon for the avatar (just an emoji for demo, or pick your own img)
+    let avatarIcon = "🧑";
+    if (info.slot === 0) avatarIcon = "🧙‍♂️";
+    if (info.slot === 1) avatarIcon = "🧑";
+    if (info.slot === 2) avatarIcon = "🦸‍♂️";
+    if (info.slot === 3) avatarIcon = "🎥";
+    let you = info.id === socket.id ? " <b>(You)</b>" : "";
+    rankingPanel.innerHTML += `
+      <div style="margin-bottom:7px">
+        <span style="font-size:22px">${avatarIcon}</span> 
+        <span style="color:#FFD700;font-weight:bold"> — ${info.coins} 🪙
+        <span style="margin-left:10px">${you} </span></span>
+      </div>`;
+  });
+}
+
+// ─────────────────────────────────────────────────────────
+// 11) RESIZE
 // ─────────────────────────────────────────────────────────
 function onWindowResize() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+}
+
+// ─────────────────────────────────────────────────────────
+// 12) Game Over (time's up // playerLives = 0)
+// ─────────────────────────────────────────────────────────
+function endGame(isTimeout = false) {
+  if (gameEnded) return;
+  gameEnded = true;
+  playerDead = true;
+  showDeathOverlay(isTimeout);
+  controls.unlock(); // unlock mouse to get back pointer
+  pauseGameTimer();
+  //  optional : lock controls, stop moving, restart button
+}
+
+function showDeathOverlay(isTimeout = false) {
+  // Remove any previous overlay
+  let oldOverlay = document.getElementById("deathOverlay");
+  if (oldOverlay) oldOverlay.remove();
+
+  // Create new overlay
+  const overlay = document.createElement("div");
+  overlay.id = "deathOverlay";
+  overlay.style.position = "fixed";
+  overlay.style.left = 0;
+  overlay.style.top = 0;
+  overlay.style.width = "100vw";
+  overlay.style.height = "100vh";
+  overlay.style.background = "rgba(0,0,0,0.85)";
+  overlay.style.display = "flex";
+  overlay.style.flexDirection = "column";
+  overlay.style.justifyContent = "center";
+  overlay.style.alignItems = "center";
+  overlay.style.zIndex = "2000";
+  overlay.style.backdropFilter = "blur(2px)";
+
+  // Main message block
+  const msgBlock = document.createElement("div");
+  msgBlock.style.display = "flex";
+  msgBlock.style.flexDirection = "column";
+  msgBlock.style.alignItems = "center";
+  msgBlock.style.gap = "12px";
+
+  // Icon & Text
+  const icon = document.createElement("div");
+  icon.style.fontSize = "74px";
+  icon.innerText = isTimeout ? "⏰" : "💀";
+
+  const msg = document.createElement("div");
+  msg.style.fontSize = "60px";
+  msg.style.fontWeight = "bold";
+  msg.style.color = "#fff";
+  msg.innerText = isTimeout ? "TIME'S UP!" : "GAME OVER!";
+
+  // Gold Collected
+  const goldRow = document.createElement("div");
+  goldRow.style.fontSize = "30px";
+  goldRow.style.margin = "12px 0 4px";
+  goldRow.style.color = "#fff";
+  goldRow.innerHTML = `Gold: <span style="color:#FFD700;font-weight:bold">${goldCount}</span> 🪙`;
+
+  // Ranking list
+  const rankBlock = document.createElement("div");
+  rankBlock.style.margin = "18px 0 0 0";
+  rankBlock.style.padding = "10px 28px";
+  rankBlock.style.background = "rgba(30,30,30,0.95)";
+  rankBlock.style.borderRadius = "12px";
+  rankBlock.style.color = "#fff";
+  rankBlock.style.fontSize = "20px";
+  rankBlock.style.minWidth = "250px";
+  rankBlock.style.boxShadow = "0 2px 12px #0008";
+  if (typeof getRankingHTML === "function") {
+    rankBlock.innerHTML = getRankingHTML();
+  } else {
+    // fallback simple
+    rankBlock.innerHTML = "<b>Ranking</b><br/>You: " + goldCount + " 🪙";
+  }
+
+  // Play Again button
+  const btn = document.createElement("button");
+  btn.innerText = "Play Again";
+  btn.style.fontSize = "28px";
+  btn.style.padding = "12px 44px";
+  btn.style.margin = "26px 0 0 0";
+  btn.style.borderRadius = "14px";
+  btn.style.border = "none";
+  btn.style.cursor = "pointer";
+  btn.style.background = "#fff";
+  btn.onclick = () => window.location.reload();
+
+  // Combine
+  msgBlock.appendChild(icon);
+  msgBlock.appendChild(msg);
+  msgBlock.appendChild(goldRow);
+  msgBlock.appendChild(rankBlock);
+  msgBlock.appendChild(btn);
+  overlay.appendChild(msgBlock);
+
+  document.body.appendChild(overlay);
+}
+
+function getRankingHTML() {
+  // If you have live ranking info stored, e.g. lastPlayersInfo
+  if (!window.lastPlayersInfo)
+    return "<b>Ranking</b><br/>You: " + goldCount + " 🪙";
+  let playersInfo = window.lastPlayersInfo.slice(); // clone to avoid side effects
+  // Sort by coins DESC
+  playersInfo.sort((a, b) => b.coins - a.coins);
+
+  let html = "<b>🏆 Ranking</b><br/><br/>";
+  playersInfo.forEach((info) => {
+    let avatarIcon = "🧑";
+    if (info.slot === 0) avatarIcon = "🧙‍♂️";
+    if (info.slot === 1) avatarIcon = "🧑";
+    if (info.slot === 2) avatarIcon = "🦸‍♂️";
+    if (info.slot === 3) avatarIcon = "🎥";
+    let you = info.id === socket.id ? " <b>(You)</b>" : "";
+    html += `
+      <div style="margin-bottom:7px">
+        <span style="font-size:22px">${avatarIcon}</span> 
+        <span style="color:#FFD700;font-weight:bold"> — ${info.coins} 🪙
+        <span style="margin-left:10px">${you} </span></span>
+      </div>`;
+  });
+  return html;
 }
