@@ -106,6 +106,45 @@ function updateCoinDisplay() {
   coinDisplay.innerText = `🪙 Gold: ${goldCount}`;
 }
 
+/* ────────────────────────────────────────────────
+   PLAYER-NAMES PANEL (bottom-left)
+───────────────────────────────────────────────── */
+const namesPanel = document.getElementById('namesPanel') || (() => {
+  const div = document.createElement('div');
+  div.id = 'namesPanel';
+  div.style.cssText = `
+  position:absolute; left:30px; bottom:30px;
+  background:rgba(0,0,0,.8); color:#fff; font-size:18px;
+  padding:16px 26px; border-radius:12px; z-index:800;
+  min-width:200px; line-height:1.4`;
+  div.innerHTML = '<b>Players</b><br>';
+  document.body.appendChild(div);
+  return div;
+})();
+
+document.querySelectorAll('#namesPanel').forEach((el,i)=> i && el.remove());
+
+const playerNames = {};          // id → name
+const coinsById = {};
+const joinOrder   = []; 
+
+function refreshNames(){
+  namesPanel.innerHTML =
+    '<b>Players</b><br>' +
+    joinOrder
+      .filter(id => playerNames[id])         // safety
+      .map(id => '• '+playerNames[id])       // bullet + name
+      .join('<br>');
+}
+
+function rememberPlayer(id, name='Anon') {
+  if (!playerNames[id]) joinOrder.push(id); // first time we see this id
+  playerNames[id] = name;
+
+  if (coinsById[id] == null) coinsById[id] = 0;
+}
+
+
 // hint when player is close to treasure
 let treasureHint = document.createElement("div");
 treasureHint.style.position = "absolute";
@@ -279,7 +318,7 @@ function init() {
     bgm.setBuffer(buffer);
     bgm.setLoop(true);
     bgm.setVolume(0.3);
-    bgm.play();
+    //bgm.play();
   });
   // store for later if you need to pause/stop
   scene.userData.bgm = bgm;
@@ -314,8 +353,9 @@ function init() {
 
   instructions.addEventListener("click", () => controls.lock());
   controls.addEventListener("lock", () => {
+
     const bgm = scene.userData.bgm;
-    if (bgm && !bgm.isPlaying) bgm.play();
+    if (bgm && bgm.buffer && !bgm.isPlaying) bgm.play();
     blocker.style.display = "none";
     instructions.style.display = "none";
     startGameTimer();
@@ -693,6 +733,34 @@ function init() {
   addEventListener("resize", onWindowResize);
 }
 
+/* ─── Name overlay logic ───────────────────────── */
+const nameOverlay = document.getElementById('nameOverlay');
+const startBtn    = document.getElementById('startBtn');
+const nameInput   = document.getElementById('playerName');
+
+startBtn.addEventListener('click', () => {
+  const typed = (nameInput.value || '').trim().slice(0, 16) || 'Anon';
+
+  rememberPlayer(socket?.id || 'local', typed);   // <-- one canonical call
+  refreshNames();
+
+  window.myPlayerName = typed;                    // keep globally
+
+  if (socket && socket.connected) {
+    socket.emit('setName', typed);                // tell the server
+  } else {
+    window.pendingName = typed;                   // stash for later
+  }
+
+  listener.context.resume().then(() => {
+    const bgm = scene.userData.bgm;
+    if (bgm && !bgm.isPlaying) bgm.play();
+  });
+
+  nameOverlay.style.display = 'none';
+  document.getElementById('blocker').style.display = 'flex';
+});
+
 // ─────────────────────────────────────────────────────────
 // 5) DUNGEON GENERATION
 // ─────────────────────────────────────────────────────────
@@ -975,11 +1043,13 @@ function openTreasure(idx) {
   treasures[idx].visible = false; // hide the treasure
   const gold = 100; // random rewards (gold coins)
   goldCount += gold;
-  showPopup(`You get: Gold x${gold}！`); // show reward
+  coinsById[socket.id] = goldCount;
+  refreshRanking();
+  showPopup(`You get: Gold x${gold}!`); // show reward
   updateCoinDisplay();
 
-  if (socket) socket.emit("goldChanged", goldCount);
-  showPopup(`You get: Gold x${gold}！`);
+  if (socket) socket.emit("goldChanged", { coins: goldCount });
+  showPopup(`You get: Gold x${gold}!`);
   updateCoinDisplay();
 }
 
@@ -1006,6 +1076,12 @@ function showPopup(msg) {
 // ─────────────────────────────────────────────────────────
 function initSocketConnection() {
   socket = io();
+  socket.on('connect',()=>{
+    const name = window.pendingName || window.myPlayerName || 'Anon';
+    rememberPlayer(socket.id, name);
+    refreshNames();
+    socket.emit('setName', name);
+  });
 
   socket.on("currentPlayers", (payload) => {
     const list = Array.isArray(payload) // <--- NEW
@@ -1013,6 +1089,7 @@ function initSocketConnection() {
       : Object.values(payload); // <--- NEW
 
     list.forEach((p) => {
+      if (p.name) rememberPlayer(p.id, p.name);
       if (p.id === socket.id) {
         mySlotIndex = p.slot;
         console.log("Slot my index:", mySlotIndex);
@@ -1074,20 +1151,56 @@ function initSocketConnection() {
         addOtherPlayer(p);
       }
     });
+    refreshNames();
   });
   // A newcomer joined after you: same logic
   socket.on("newPlayer", (pkt) => {
     const p = pkt.data ? { id: pkt.id, ...pkt.data } : pkt;
+    if (p.name) rememberPlayer(p.id, p.name);
+    refreshRanking();
     addOtherPlayer(p);
+    refreshNames();
   });
 
   socket.on("playerMoved", ({ id, data }) => {
     const p = players[id];
-    if (p) {
-      p.mesh.position.set(data.position.x, data.position.y, data.position.z);
-      p.mesh.rotation.y = data.rotation.y;
-      p.lastUpdate = performance.now();
+    if (!p) return;
+
+    /* -- position & heading ------------------------------------------ */
+    const prevX = p.mesh.position.x;
+    const prevZ = p.mesh.position.z;
+
+    p.mesh.position.set(data.position.x, data.position.y, data.position.z);
+    p.mesh.rotation.y  = data.rotation.y + Math.PI;
+    p.lastUpdate       = performance.now();
+
+    /* -- NEW : decide if this player is moving ----------------------- */
+    const dx = data.position.x - prevX;
+    const dz = data.position.z - prevZ;
+    const moving = Math.hypot(dx, dz) > 0.001;  // tiny epsilon
+
+    if (p.action) {
+      if (moving && p.action.paused)          p.action.paused = false;
+      if (!moving && !p.action.paused) {
+        p.action.paused = true;
+        p.action.time   = 0;                  // reset to first frame
+      }
     }
+
+    //below is correct one
+    // const p = players[id];
+    // if (p) {
+    //   p.mesh.position.set(data.position.x, data.position.y, data.position.z);
+    //   p.mesh.rotation.y = data.rotation.y;
+    //   p.lastUpdate = performance.now();
+    // }
+
+  });
+
+  socket.on('playerNameUpdated',({id,name})=>{
+    rememberPlayer(id, name);
+    refreshRanking();
+    refreshNames();
   });
 
   socket.on("removePlayer", (id) => {
@@ -1095,16 +1208,45 @@ function initSocketConnection() {
       scene.remove(players[id].mesh);
       delete players[id];
     }
+
+    // 2) tidy up name & ranking tables
+    delete playerNames[id];
+    const i = joinOrder.indexOf(id);
+    if (i !== -1) joinOrder.splice(i, 1);
+
+    refreshNames();
+    refreshRanking();
   });
 
   socket.on("roomFull", () => {
     alert("This dungeon already has four adventurers. Try again later!");
   });
 
-  socket.on("playersRanking", (playersInfo) => {
-    updateRanking(playersInfo);
+  socket.on('goldChanged', ({ id, coins }) => {
+    coinsById[id] = coins ?? 0;
+    refreshRanking();
+  });
+
+  socket.on('playersRanking', (playersInfo=[]) => {
+    playersInfo.forEach(p => {
+      coinsById[p.id] = p.coins ?? 0;       // keep the map evergreen
+      if (p.name) rememberPlayer(p.id, p.name);
+    });
+    refreshRanking();                       // <- our new renderer (next step)
   });
 }
+
+/* keep-alive so other clients don’t think we vanished */
+setInterval(() => {
+  if (!socket?.connected) return;
+  const p = controls.getObject().position;
+  const r = camera.rotation;
+  socket.emit("updateMovement", {           // re-use the same packet
+    position: { x: p.x, y: p.y - playerHeight, z: p.z },
+    rotation: { x: r.x, y: r.y, z: r.z }
+  });
+}, 1000);
+
 
 // function addOtherPlayer(id, data) {
 //   const geo = new THREE.BoxGeometry(1, 1.8, 1);
@@ -1115,39 +1257,65 @@ function initSocketConnection() {
 //   players[id] = { mesh, lastUpdate: performance.now() };
 // }
 function addOtherPlayer({ id, slot, position, rotation = { y: 0 } }) {
-  let mesh;
+  let mesh, proto;
   console.log("Slot here:", slot);
 
   // ─── 1. Choose the graphic ──────────────────────────────────────────
   if (slot === 0 && avatarGLTF1) {
     mesh = SkeletonUtils.clone(avatarGLTF1);
+    proto = avatarGLTF1;
     console.log("Avatar1.");
+
   } else if (slot === 1 && avatarGLTF2) {
     mesh = SkeletonUtils.clone(avatarGLTF2);
     console.log("Avatar2.");
+    proto = avatarGLTF2;
+
   } else if (slot === 2 && avatarGLTF3) {
     mesh = SkeletonUtils.clone(avatarGLTF3);
     console.log("Avatar3.");
+    proto = avatarGLTF3;
+
   } else if (slot === 3 && avatarGLTF4) {
     mesh = SkeletonUtils.clone(avatarGLTF4);
     console.log("Avatar4.");
-  } else {
-    // fallback: green cube
-    mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1.8, 1),
-      new THREE.MeshPhongMaterial({ color: 0x00ff00 })
-    );
+    proto = avatarGLTF4;
+
   }
+  /* -------- build mixer & walk/idle action ---------- */
+  if (proto) {
+    const mixer       = new THREE.AnimationMixer(mesh);
+
+    const clipNames   = [AVATAR_ANIM, AVATAR_ANIM2, AVATAR_ANIM3, AVATAR_ANIM4];
+    const wantName    = clipNames[slot] || proto.userData.clips[0].name;
+    const srcClip     = proto.userData.clips.find(c => c.name === wantName)
+                      || proto.userData.clips[0];
+
+    const action      = mixer.clipAction(srcClip);
+    action.setLoop(THREE.LoopRepeat, Infinity);
+    action.clampWhenFinished = true;
+    action.paused     = true;     // start in idle pose
+    action.time       = 0;
+    action.play();
+
+    mesh.userData.mixer  = mixer;
+    mesh.userData.action = action;
+  }
+  /* --------------------------------------------------- */
+
 
   // ─── 2. Place it in the world ───────────────────────────────────────
-  mesh.position.set(position.x, position.y, position.z);
-  mesh.rotation.y = rotation.y; // faces the right way
+  mesh.position.set(position.x, position.y - playerHeight, position.z);
+  mesh.rotation.y = (rotation.y || 0) + Math.PI; // faces the right way
   scene.add(mesh);
 
   // ─── 3. Register in our dictionary ──────────────────────────────────
   players[id] = {
     mesh,
+    mixer : mesh.userData.mixer || null,
+    action: mesh.userData.action || null,
     lastUpdate: performance.now(),
+    slot 
   };
 }
 
@@ -1507,23 +1675,28 @@ function animate() {
       avatarMixer.update(dt);
     }
 
+    for (const id in players) {
+      const m = players[id].mixer;
+      if (m) m.update(dt);
+    }
+
     /* 9.6 Broadcast movement (≈20 Hz) ------------------------------------ */
     if (now % 50 < dt * 1000) {
       const p = controls.getObject().position;
       const r = camera.rotation;
       socket.emit("updateMovement", {
-        position: { x: p.x, y: p.y, z: p.z },
+        position: { x: p.x, y: p.y - playerHeight, z: p.z },
         rotation: { x: r.x, y: r.y, z: r.z },
       });
     }
   }
 
   /* 9.7 Purge stale remote players --------------------------------------- */
-  for (const id in players)
-    if (now - players[id].lastUpdate > 5000) {
-      scene.remove(players[id].mesh);
-      delete players[id];
-    }
+  // for (const id in players)
+  //   if (now - players[id].lastUpdate > 5000) {
+  //     scene.remove(players[id].mesh);
+  //     delete players[id];
+  //   }
 
   prevTime = now;
   renderer.render(scene, camera);
@@ -1548,28 +1721,63 @@ rankingPanel.innerHTML = "<b>🏆 Ranking</b><br/>";
 document.body.appendChild(rankingPanel);
 
 // --- Helper to update the ranking list ---
-function updateRanking(playersInfo) {
-  window.lastPlayersInfo = playersInfo.slice();
-  playersInfo.sort((a, b) => b.coins - a.coins);
-  rankingPanel.innerHTML = "<b>🏆 Ranking</b><br/><br/>";
-  // Sort by coins descending
-  playersInfo.sort((a, b) => b.coins - a.coins);
-  playersInfo.forEach((info, i) => {
-    // Use a character icon for the avatar (just an emoji for demo, or pick your own img)
-    let avatarIcon = "🧑";
-    if (info.slot === 0) avatarIcon = "🧙‍♂️";
-    if (info.slot === 1) avatarIcon = "🧑";
-    if (info.slot === 2) avatarIcon = "🦸‍♂️";
-    if (info.slot === 3) avatarIcon = "🎥";
-    let you = info.id === socket.id ? " <b>(You)</b>" : "";
+function refreshRanking() {
+  // Build a complete list first
+  const rows = joinOrder.map(id => ({
+    id,
+    name : playerNames[id] || 'Anon',
+    slot : players[id]?.slot ?? (id === socket.id ? mySlotIndex : 0),
+    coins: coinsById[id] ?? 0
+  }));
+
+  // Sort DESC by coins
+  rows.sort((a,b) => b.coins - a.coins);
+
+  // Render
+  rankingPanel.innerHTML = "<b>🏆 Ranking</b><br><br>";
+  rows.forEach(r => {
+    const icon =
+        r.slot === 0 ? "🧙‍♂️" :
+        r.slot === 1 ? "🧑"   :
+        r.slot === 2 ? "🦸‍♂️" :
+        r.slot === 3 ? "🎥"   : "🧑";
+    const you = r.id === socket.id ? " <b>(You)</b>" : "";
     rankingPanel.innerHTML += `
-      <div style="margin-bottom:7px">
-        <span style="font-size:22px">${avatarIcon}</span> 
-        <span style="color:#FFD700;font-weight:bold"> — ${info.coins} 🪙
-        <span style="margin-left:10px">${you} </span></span>
+      <div style="margin-bottom:7px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:22px">${icon}</span>
+        <span style="flex:1">${r.name}</span>
+        <span style="color:#FFD700;font-weight:bold">${r.coins}</span>${you}
       </div>`;
   });
+
+  /* keep a copy for the death-screen */
+  window.lastPlayersInfo = rows;
 }
+
+// function updateRanking(playersInfo) {
+//   window.lastPlayersInfo = playersInfo.slice();
+//   playersInfo.sort((a, b) => b.coins - a.coins);
+//   rankingPanel.innerHTML = "<b>🏆 Ranking</b><br/><br/>";
+//   // Sort by coins descending
+//   playersInfo.sort((a, b) => b.coins - a.coins);
+//   playersInfo.forEach((info, i) => {
+//     // Use a character icon for the avatar (just an emoji for demo, or pick your own img)
+//     const name = (info.name || playerNames[info.id] || 'Anon'); 
+//     let avatarIcon = "🧑";
+//     if (info.slot === 0) avatarIcon = "🧙‍♂️";
+//     if (info.slot === 1) avatarIcon = "🧑";
+//     if (info.slot === 2) avatarIcon = "🦸‍♂️";
+//     if (info.slot === 3) avatarIcon = "🎥";
+//     let you = info.id === socket.id ? " <b>(You)</b>" : "";
+//     rankingPanel.innerHTML += `
+//       <div style="margin-bottom:7px;display:flex;align-items:center;gap:8px">
+//         <span style="font-size:22px">${avatarIcon}</span>
+//         <span style="flex:1">${name}</span>
+//         <span style="color:#FFD700;font-weight:bold">${info.coins} 🪙</span>
+//         ${you}
+//       </div>`;
+//   });
+// }
 
 // ─────────────────────────────────────────────────────────
 // 11) RESIZE
@@ -1587,6 +1795,7 @@ function endGame(isTimeout = false) {
   if (gameEnded) return;
   gameEnded = true;
   playerDead = true;
+  refreshRanking(); 
   showDeathOverlay(isTimeout);
   controls.unlock(); // unlock mouse to get back pointer
   pauseGameTimer();
@@ -1637,7 +1846,7 @@ function showDeathOverlay(isTimeout = false) {
   goldRow.style.fontSize = "30px";
   goldRow.style.margin = "12px 0 4px";
   goldRow.style.color = "#fff";
-  goldRow.innerHTML = `Gold: <span style="color:#FFD700;font-weight:bold">${goldCount}</span> 🪙`;
+  goldRow.innerHTML = `Gold: <span style="color:#FFD700;font-weight:bold">${goldCount}</span>`;
 
   // Ranking list
   const rankBlock = document.createElement("div");
@@ -1649,12 +1858,15 @@ function showDeathOverlay(isTimeout = false) {
   rankBlock.style.fontSize = "20px";
   rankBlock.style.minWidth = "250px";
   rankBlock.style.boxShadow = "0 2px 12px #0008";
-  if (typeof getRankingHTML === "function") {
-    rankBlock.innerHTML = getRankingHTML();
-  } else {
-    // fallback simple
-    rankBlock.innerHTML = "<b>Ranking</b><br/>You: " + goldCount + " 🪙";
-  }
+  rankBlock.innerHTML = rankingPanel.innerHTML;
+  // if (typeof getRankingHTML === "function") {
+  //   rankBlock.innerHTML = rankingPanel.innerHTML;
+  //   //rankBlock.innerHTML = getRankingHTML();
+  // } else {
+  //   // fallback simple
+  //   rankBlock.innerHTML = rankingPanel.innerHTML;
+  //   //rankBlock.innerHTML = "<b>Ranking</b><br/>You: " + goldCount + " 🪙";
+  // }
 
   // Play Again button
   const btn = document.createElement("button");
@@ -1682,13 +1894,14 @@ function showDeathOverlay(isTimeout = false) {
 function getRankingHTML() {
   // If you have live ranking info stored, e.g. lastPlayersInfo
   if (!window.lastPlayersInfo)
-    return "<b>Ranking</b><br/>You: " + goldCount + " 🪙";
+    return "<b>Ranking</b><br/>You: " + goldCount;
   let playersInfo = window.lastPlayersInfo.slice(); // clone to avoid side effects
   // Sort by coins DESC
   playersInfo.sort((a, b) => b.coins - a.coins);
 
   let html = "<b>🏆 Ranking</b><br/><br/>";
   playersInfo.forEach((info) => {
+    const name = (info.name || playerNames[info.id] || 'Anon');
     let avatarIcon = "🧑";
     if (info.slot === 0) avatarIcon = "🧙‍♂️";
     if (info.slot === 1) avatarIcon = "🧑";
@@ -1696,10 +1909,11 @@ function getRankingHTML() {
     if (info.slot === 3) avatarIcon = "🎥";
     let you = info.id === socket.id ? " <b>(You)</b>" : "";
     html += `
-      <div style="margin-bottom:7px">
-        <span style="font-size:22px">${avatarIcon}</span> 
-        <span style="color:#FFD700;font-weight:bold"> — ${info.coins} 🪙
-        <span style="margin-left:10px">${you} </span></span>
+      <div style="margin-bottom:7px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:22px">${avatarIcon}</span>
+        <span style="flex:1">${name}</span>
+        <span style="color:#FFD700;font-weight:bold">${info.coins}</span>
+        ${you}
       </div>`;
   });
   return html;

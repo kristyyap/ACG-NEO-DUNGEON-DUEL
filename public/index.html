@@ -17,9 +17,34 @@
       text-align: center;
       cursor: pointer;
     }
+
+    #nameOverlay{
+      position:absolute; inset:0;
+      display:flex; flex-direction:column; justify-content:center; align-items:center;
+      background:rgba(0,0,0,.75);      /* dim the game */
+      z-index:9999;
+    }
+    #nameOverlay input{
+      font-size:24px; padding:10px 18px; border-radius:8px; border:none;
+      width:280px; max-width:84%;
+      margin-bottom:18px;
+    }
+    #nameOverlay button{
+      font-size:24px; padding:10px 32px; border:none; border-radius:8px; cursor:pointer;
+    }
+    /* keep Pointer-Lock blocker hidden until the name is given */
+    #blocker{ display:none; }
+
   </style>
 </head>
 <body>
+  <!-- ─── NEW overlay – shown first ─────────────────────── -->
+  <div id="nameOverlay">
+    <input id="playerName" type="text" maxlength="16" placeholder="Your name (max 16 chars)">
+    <button id="startBtn">Start Play</button>
+  </div>
+
+
   <!-- PointerLock “Click to Play” overlay -->
   <div id="blocker">
     <div id="instructions">
