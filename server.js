@@ -1,34 +1,66 @@
-// server.js – minimal Express + Socket.io hub (modern style)
-
 const express = require('express');
-const http    = require('http');          // plain Node HTTP
-const { Server } = require('socket.io');  // ES-style import from socket.io
-const path    = require('path');
+const http = require('http');
+const { Server } = require('socket.io');
+const path = require('path');
 
-const app    = express();
-const server = http.createServer(app);    // wrap Express in a raw HTTP server
-const io     = new Server(server);        // pass that server to Socket.io
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
-const PORT         = 3000;                // or any free port ≥ 1024
-const MAX_PLAYERS  = 4;
-const freeSlots    = [0, 1, 2, 3];
+const PORT = 3000;
+const MAX_PLAYERS = 4;
+const GAME_DURATION = 120000; // 120 seconds in milliseconds
+const freeSlots = [0, 1, 2, 3];
 
-// ─────────────────────────────────────────────────────────
-// static files (client JS, textures, etc.)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// listen on all network interfaces so other laptops can reach us
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`open http://localhost:${PORT}`);
 });
 
-// ─────────────────────────────────────────────────────────
-// in-memory list of players: { id: { position, rotation, slot } }
 const players = {};
-const coinsById   = Object.create(null);
+const coinsById = Object.create(null);
 const playerNames = Object.create(null);
+let gameStartTime = null;
+let timerInterval = null;
+let gameStarted = false;
+let paused = false;
+let readyPlayers = new Set();
 
-// new connection
+function isSoloMode() {
+  return Object.keys(players).length === 1;
+}
+
+function startGameTimer() {
+  if (timerInterval || gameStarted) return;
+  gameStarted = true;
+  gameStartTime = Date.now();
+  timerInterval = setInterval(() => {
+    if (!paused) {
+      const elapsed = Date.now() - gameStartTime;
+      const remaining = Math.max(0, Math.floor((GAME_DURATION - elapsed) / 1000));
+      io.emit('timerUpdate', { remaining });
+      if (remaining <= 0) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+        io.emit('gameOver');
+      }
+    }
+  }, 1000);
+}
+
+function pauseGameTimer() {
+  if (!isSoloMode() || paused) return;
+  paused = true;
+  io.emit('gamePaused', { paused: true });
+}
+
+function resumeGameTimer() {
+  if (!isSoloMode() || !paused) return;
+  paused = false;
+  io.emit('gamePaused', { paused: false });
+}
+
 io.on('connection', socket => {
   if (freeSlots.length === 0) {
     socket.emit('roomFull');
@@ -39,39 +71,76 @@ io.on('connection', socket => {
   const slot = freeSlots.shift();
   players[socket.id] = {
     slot,
-    position: { x: 0, y: 1.6, z: 0 },   // eyes 1.6 m above floor
+    position: { x: 0, y: 1.6, z: 0 },
     rotation: { x: 0, y: 0, z: 0 },
-    name:'',
+    name: '',
+    ready: false,
   };
 
   console.log(`▶ join ${socket.id} → slot ${slot}`);
 
-  // send full roster
   socket.emit('currentPlayers',
     Object.entries(players).map(([id, p]) => ({ id, ...p }))
   );
   socket.broadcast.emit('newPlayer', { id: socket.id, data: players[socket.id] });
 
-   /* NEW – initial full ranking (so lobby screens are up-to-date) */
   socket.emit('playersRanking',
     Object.entries(coinsById).map(([id, coins]) => ({
       id,
       coins,
-      name: playerNames[id] || players[id]?.name || 'Anon'
+      name: playerNames[id] || players[id]?.name || 'Anon',
     }))
   );
 
+  // Send initial timer state
+  const elapsed = gameStartTime ? Date.now() - gameStartTime : 0;
+  const remaining = gameStarted ? Math.max(0, Math.floor((GAME_DURATION - elapsed) / 1000)) : 120;
+  socket.emit('timerUpdate', { remaining });
+  socket.emit('gamePaused', { paused });
 
-  socket.on('setName', rawName=>{
-    if(!players[socket.id]) return;
-    const name = String(rawName||'').trim().slice(0,16) || 'Anon';
-    players[socket.id].name = name;
-    playerNames[socket.id] = name;
-
-    io.emit('playerNameUpdated',{ id:socket.id, name });
+  // Send ready status
+  socket.emit('readyStatus', {
+    readyCount: readyPlayers.size,
+    totalPlayers: Object.keys(players).length,
   });
 
-  // movement from a client
+  socket.on('startGame', () => {
+    if (players[socket.id].slot === 0 && !gameStarted) {
+      startGameTimer();
+      io.emit('gameStarted');
+    }
+  });
+
+  socket.on('playerReady', () => {
+    if (!players[socket.id]) return;
+    players[socket.id].ready = true;
+    readyPlayers.add(socket.id);
+    io.emit('readyStatus', {
+      readyCount: readyPlayers.size,
+      totalPlayers: Object.keys(players).length,
+    });
+  });
+
+  socket.on('pauseGame', () => {
+    if (isSoloMode() && gameStarted) {
+      pauseGameTimer();
+    }
+  });
+
+  socket.on('resumeGame', () => {
+    if (isSoloMode() && gameStarted) {
+      resumeGameTimer();
+    }
+  });
+
+  socket.on('setName', rawName => {
+    if (!players[socket.id]) return;
+    const name = String(rawName || '').trim().slice(0, 16) || 'Anon';
+    players[socket.id].name = name;
+    playerNames[socket.id] = name;
+    io.emit('playerNameUpdated', { id: socket.id, name });
+  });
+
   socket.on('updateMovement', data => {
     if (!players[socket.id]) return;
     players[socket.id].position = data.position;
@@ -79,20 +148,32 @@ io.on('connection', socket => {
     io.emit('playerMoved', { id: socket.id, data });
   });
 
-  /* NEW – single-player coin total changed */
   socket.on('goldChanged', ({ coins }) => {
-    coinsById[socket.id] = coins ?? 0;           // store
-    io.emit('goldChanged', {                     // rebroadcast so
-      id:    socket.id,                          //   every client
-      coins                                        //   updates its panel
-    });
+    coinsById[socket.id] = coins ?? 0;
+    io.emit('goldChanged', { id: socket.id, coins });
   });
 
-  /* ===== disconnect ===== */
   socket.on('disconnect', () => {
     const me = players[socket.id];
-    if (me) freeSlots.unshift(me.slot);   // slot becomes free again
+    if (me) freeSlots.unshift(me.slot);
     delete players[socket.id];
+    delete coinsById[socket.id];
+    delete playerNames[socket.id];
+    readyPlayers.delete(socket.id);
     io.emit('removePlayer', socket.id);
+    io.emit('readyStatus', {
+      readyCount: readyPlayers.size,
+      totalPlayers: Object.keys(players).length,
+    });
+    if (Object.keys(players).length === 0) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+      gameStartTime = null;
+      gameStarted = false;
+      paused = false;
+      readyPlayers.clear();
+    } else if (isSoloMode() && gameStarted && !paused) {
+      pauseGameTimer();
+    }
   });
 });

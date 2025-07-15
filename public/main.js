@@ -11,6 +11,7 @@ import { DecalGeometry } from "https://unpkg.com/three@0.160.0/examples/jsm/geom
 let socket;
 let mySlotIndex = null;
 let loadedAvatars = 0;
+let isSoloMode = false;
 
 // ─────────────────────────────────────────────────────────
 // 2) GLOBALS
@@ -198,10 +199,6 @@ function updateHealthBar() {
 updateHealthBar();
 
 // Game Duration - Timer
-let gameDuration = 120; // seconds
-let gameTimerInterval = null;
-let timerRunning = false; // set is the timer counting down
-let gameTimeLeft = gameDuration; // seconds
 let timerDisplay = document.createElement("div");
 timerDisplay.style.position = "absolute";
 timerDisplay.style.top = "20px";
@@ -219,25 +216,20 @@ timerDisplay.innerText = "Time: 120";
 document.body.appendChild(timerDisplay);
 let gameEnded = false;
 
-function startGameTimer() {
-  if (timerRunning || gameEnded) return;
-  timerRunning = true;
-  gameTimerInterval = setInterval(() => {
-    if (gameEnded) return;
-    gameTimeLeft--;
-    if (gameTimeLeft < 0) gameTimeLeft = 0;
-    timerDisplay.innerText = `Time: ${gameTimeLeft}`;
-    if (gameTimeLeft === 0) {
-      endGame(true);
-    }
-  }, 1000);
-}
-
-function pauseGameTimer() {
-  timerRunning = false;
-  if (gameTimerInterval) clearInterval(gameTimerInterval);
-  gameTimerInterval = null;
-}
+// Ready Status UI
+let readyStatusDisplay = document.createElement("div");
+readyStatusDisplay.style.position = "absolute";
+readyStatusDisplay.style.top = "60px";
+readyStatusDisplay.style.right = "32px";
+readyStatusDisplay.style.background = "rgba(0,0,0,0.6)";
+readyStatusDisplay.style.color = "#FFF";
+readyStatusDisplay.style.fontWeight = "bold";
+readyStatusDisplay.style.fontSize = "18px";
+readyStatusDisplay.style.padding = "6px 18px";
+readyStatusDisplay.style.borderRadius = "14px";
+readyStatusDisplay.style.zIndex = "500";
+readyStatusDisplay.style.display = "none";
+document.body.appendChild(readyStatusDisplay);
 
 // ─────────────────────────────────────────────────────────
 // 3) HELPER — capsule-like AABB for the player
@@ -347,14 +339,27 @@ function init() {
     if (bgm && bgm.buffer && !bgm.isPlaying) bgm.play();
     blocker.style.display = "none";
     instructions.style.display = "none";
-    startGameTimer();
+    if (socket && socket.connected) {
+      socket.emit('playerReady');
+      if (mySlotIndex === 0 && !isSoloMode) {
+        socket.emit('startGame');
+      } else if (isSoloMode) {
+        socket.emit('startGame');
+        socket.emit('resumeGame');
+      }
+    }
   });
   controls.addEventListener("unlock", () => {
     const bgm = scene.userData.bgm;
     if (bgm && bgm.isPlaying) bgm.stop();
     blocker.style.display = "flex";
     instructions.style.display = "";
-    pauseGameTimer();
+    if (socket && socket.connected && isSoloMode) {
+      socket.emit('pauseGame');
+    }
+    if (!isSoloMode) {
+      showPopup("Pause disabled in multiplayer");
+    }
   });
 
   scene.add(controls.getObject());
@@ -577,9 +582,6 @@ function init() {
     undefined,
     (err) => console.error("Error loading avatar4 GLTF:", err)
   );
-
-  // multiplayer
-  // initSocketConnection();
 
   // input
   document.addEventListener("keydown", onKeyDown);
@@ -820,6 +822,36 @@ function initSocketConnection() {
     rememberPlayer(socket.id, name);
     refreshNames();
     socket.emit('setName', name);
+  });
+
+  socket.on("timerUpdate", ({ remaining }) => {
+    timerDisplay.innerText = `Time: ${remaining}`;
+  });
+
+  socket.on("gamePaused", ({ paused }) => {
+    if (paused) {
+      timerDisplay.innerText += " (Paused)";
+    }
+  });
+
+  socket.on("gameStarted", () => {
+    readyStatusDisplay.style.display = "none";
+  });
+
+  socket.on("readyStatus", ({ readyCount, totalPlayers }) => {
+    isSoloMode = totalPlayers === 1;
+    if (isSoloMode) {
+      readyStatusDisplay.style.display = "none";
+    } else if (!gameEnded) {
+      readyStatusDisplay.style.display = "block";
+      readyStatusDisplay.innerText = mySlotIndex === 0
+        ? `${readyCount}/${totalPlayers} players ready`
+        : `Waiting for host... (${readyCount}/${totalPlayers} ready)`;
+    }
+  });
+
+  socket.on("gameOver", () => {
+    if (!gameEnded) endGame(true);
   });
 
   socket.on("currentPlayers", (payload) => {
@@ -1426,7 +1458,6 @@ function endGame(isTimeout = false) {
   refreshRanking();
   showDeathOverlay(isTimeout);
   controls.unlock();
-  pauseGameTimer();
 }
 
 function showDeathOverlay(isTimeout = false) {
