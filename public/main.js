@@ -1,25 +1,18 @@
-import * as THREE from "three"; // via <script type="importmap">
+import * as THREE from "three";
 import { FIXED_LAYOUT, spawnSpots } from "./layout.js";
 import { PointerLockControls } from "https://unpkg.com/three@0.160.0/examples/jsm/controls/PointerLockControls.js";
-
-// Added for 3D model
 import { GLTFLoader } from "https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "https://unpkg.com/three@0.160.0/examples/jsm/utils/SkeletonUtils.js";
 import { DecalGeometry } from "https://unpkg.com/three@0.160.0/examples/jsm/geometries/DecalGeometry.js";
 
-// socket.io is injected in index.html
 let socket;
 let mySlotIndex = null;
 let loadedAvatars = 0;
 let isSoloMode = false;
 
-// ─────────────────────────────────────────────────────────
-// 2) GLOBALS
-// ─────────────────────────────────────────────────────────
 let camera, scene, renderer, controls;
-let raycaster = new THREE.Raycaster(); // still used for monster LOS
+let raycaster = new THREE.Raycaster();
 let spawnPos = new THREE.Vector3();
-let treasureMesh;
 let torch;
 let avatarGLTF1 = null;
 let avatarGLTF2 = null;
@@ -44,17 +37,17 @@ const monsters = [];
 const monsterClones = [];
 const treasures = [];
 
-const objects = []; // wall meshes (for lighting / LOS)
-const wallBoxes = []; // AABBs for capsule–wall collision
-const players = {}; // remote avatars
+const objects = [];
+const wallBoxes = [];
+const players = {};
 
-const MONSTER_SPEED = 2.0; // m · s-1 (walking pace)
-const MONSTER_SIGHT = 18.0; // meters (how far they can “see”)
+const MONSTER_SPEED = 2.0;
+const MONSTER_SIGHT = 18.0;
 const MONSTER_RADIUS = 0.4;
 
-const SPEED = 5; // m·s-1
-const playerHeight = 1.6; // eye height above floor
-const PLAYER_RADIUS = 0.4; // for collision
+const SPEED = 5;
+const playerHeight = 1.6;
+const PLAYER_RADIUS = 0.4;
 
 const listener = new THREE.AudioListener();
 const audioLoader = new THREE.AudioLoader();
@@ -66,22 +59,14 @@ let moveForward = false,
 
 let prevTime = performance.now();
 
-// dungeon map
-const DUNGEON_SIZE = 41; // must be odd
-let dungeonMap = []; // 0 wall | 1 floor
+const DUNGEON_SIZE = 41;
+let dungeonMap = [];
 
-// Monster sprite + visibility
-let monsterSprite;
-let monsterPosition = new THREE.Vector3();
-let monsterVisible = false;
-
-// Added for 3D model
 let monsterGLTF = null;
 let monsterMixer = null;
 let monsterClips = null;
 const clipIndexByName = {};
 
-// Minimap setup
 let minimapCanvas, minimapCtx;
 minimapCanvas = document.getElementById("minimap");
 if (minimapCanvas) {
@@ -90,7 +75,6 @@ if (minimapCanvas) {
   console.warn("Minimap canvas not found");
 }
 
-// Open Treasures - Collect Coins
 let goldCount = 0;
 let openedTreasures = new Set();
 let nearestTreasureIndex = null;
@@ -109,14 +93,10 @@ coinDisplay.style.zIndex = "200";
 coinDisplay.innerText = "🪙 Gold: 0";
 document.body.appendChild(coinDisplay);
 
-// Refresh UI
 function updateCoinDisplay() {
   coinDisplay.innerText = `🪙 Gold: ${goldCount}`;
 }
 
-/* ────────────────────────────────────────────────
-   PLAYER-NAMES PANEL (bottom-left)
-───────────────────────────────────────────────── */
 const namesPanel = document.getElementById('namesPanel') || (() => {
   const div = document.createElement('div');
   div.id = 'namesPanel';
@@ -132,27 +112,25 @@ const namesPanel = document.getElementById('namesPanel') || (() => {
 
 document.querySelectorAll('#namesPanel').forEach((el,i)=> i && el.remove());
 
-const playerNames = {}; // id → name
+const playerNames = {};
 const coinsById = {};
 const joinOrder = [];
 
-function refreshNames(){
+function refreshNames() {
   namesPanel.innerHTML =
     '<b>Players</b><br>' +
     joinOrder
-      .filter(id => playerNames[id]) // safety
-      .map(id => '• '+playerNames[id]) // bullet + name
+      .filter(id => playerNames[id])
+      .map(id => `• ${playerNames[id]} (Slot ${players[id]?.slot ?? (id === socket.id ? mySlotIndex : '?')})${id === socket.id ? ' (You)' : ''}${players[id]?.slot === 0 ? ' (Host)' : ''}`)
       .join('<br>');
 }
 
 function rememberPlayer(id, name='Anon') {
-  if (!playerNames[id]) joinOrder.push(id); // first time we see this id
+  if (!playerNames[id]) joinOrder.push(id);
   playerNames[id] = name;
-
   if (coinsById[id] == null) coinsById[id] = 0;
 }
 
-// hint when player is close to treasure
 let treasureHint = document.createElement("div");
 treasureHint.style.position = "absolute";
 treasureHint.style.pointerEvents = "none";
@@ -167,11 +145,9 @@ treasureHint.style.zIndex = "150";
 treasureHint.innerText = "Press E to open treasure";
 document.body.appendChild(treasureHint);
 
-// Health Bar (3 lives for 1 player)
 let playerLives = 3;
 const maxLives = 3;
 let playerDead = false;
-// health bar
 let healthBar = document.createElement("div");
 healthBar.style.position = "absolute";
 healthBar.style.top = "20px";
@@ -190,7 +166,6 @@ healthBar.style.textShadow = "0 2px 10px #000";
 document.body.appendChild(healthBar);
 
 function updateHealthBar() {
-  // 3 heart represent player's lives
   let hearts = "";
   for (let i = 0; i < playerLives; ++i) hearts += "❤️ ";
   for (let i = playerLives; i < maxLives; ++i) hearts += "🤍 ";
@@ -198,7 +173,6 @@ function updateHealthBar() {
 }
 updateHealthBar();
 
-// Game Duration - Timer
 let timerDisplay = document.createElement("div");
 timerDisplay.style.position = "absolute";
 timerDisplay.style.top = "20px";
@@ -216,8 +190,8 @@ timerDisplay.innerText = "Time: 120";
 document.body.appendChild(timerDisplay);
 let gameEnded = false;
 
-// Ready Status UI
 let readyStatusDisplay = document.createElement("div");
+readyStatusDisplay.id = "readyStatusDisplay";
 readyStatusDisplay.style.position = "absolute";
 readyStatusDisplay.style.top = "60px";
 readyStatusDisplay.style.right = "32px";
@@ -231,9 +205,6 @@ readyStatusDisplay.style.zIndex = "500";
 readyStatusDisplay.style.display = "none";
 document.body.appendChild(readyStatusDisplay);
 
-// ─────────────────────────────────────────────────────────
-// 3) HELPER — capsule-like AABB for the player
-// ─────────────────────────────────────────────────────────
 function makePlayerBox(pos) {
   return new THREE.Box3(
     new THREE.Vector3(
@@ -248,46 +219,30 @@ function makePlayerBox(pos) {
 function onAvatarLoaded() {
   loadedAvatars++;
   if (loadedAvatars === 4) {
-    // now all avatarGLTF1–4 are non-null
     initSocketConnection();
   }
 }
 
-// ─── DRAGONBALL SPHERE SETUP ──────────────────────────────────
-// 1) Sphere geometry (smooth enough for decals)
 const dragonGeo = new THREE.SphereGeometry(0.5, 64, 64);
-
-// 2) Base material (the “orange” ball)
 const dragonMat = new THREE.MeshStandardMaterial({
   color: 0xffc63f,
   metalness: 0,
   roughness: 0.7,
 });
 
-// 3) Load the seven-star decal texture (PNG with alpha!)
 new THREE.TextureLoader().load(
   "textures/dragonball.png",
-  // onLoad callback:
   (decalTex) => {
     decalTex.minFilter = THREE.LinearMipMapLinearFilter;
     decalTex.magFilter = THREE.LinearFilter;
     decalTex.wrapS = decalTex.wrapT = THREE.ClampToEdgeWrapping;
-
-    // Now that the texture is ready, place your treasures
     placeDragonBalls(decalTex);
   },
   undefined,
   (err) => console.error("Failed to load dragonball.png:", err)
 );
 
-// ─────────────────────────────────────────────────────────
-// 4) MAIN SET-UP
-// ─────────────────────────────────────────────────────────
-init();
-animate();
-
 function init() {
-  // scene / camera / renderer
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x000000);
   scene.fog = new THREE.Fog(0x000000, 18, 40);
@@ -298,7 +253,6 @@ function init() {
 
   camera.add(listener);
 
-  // Background music (non‐positional, plays in loop)
   const bgm = new THREE.Audio(listener);
   audioLoader.load("sounds/bgm.mp3", (buffer) => {
     bgm.setBuffer(buffer);
@@ -328,7 +282,6 @@ function init() {
   renderer.setSize(innerWidth, innerHeight);
   document.body.appendChild(renderer.domElement);
 
-  // controls
   controls = new PointerLockControls(camera, document.body);
   const blocker = document.getElementById("blocker");
   const instructions = document.getElementById("instructions");
@@ -341,10 +294,10 @@ function init() {
     instructions.style.display = "none";
     if (socket && socket.connected) {
       socket.emit('playerReady');
-      if (mySlotIndex === 0 && !isSoloMode) {
+      if (mySlotIndex === 0 || isSoloMode) {
         socket.emit('startGame');
-      } else if (isSoloMode) {
-        socket.emit('startGame');
+      }
+      if (isSoloMode) {
         socket.emit('resumeGame');
       }
     }
@@ -365,7 +318,6 @@ function init() {
   scene.add(controls.getObject());
   controls.getObject().position.set(0, playerHeight, 0);
 
-  // lighting
   scene.add(new THREE.AmbientLight(0x111111, 0.3));
   torch = new THREE.SpotLight(
     0xffddaa,
@@ -387,7 +339,6 @@ function init() {
   scene.add(torch);
   scene.add(torch.target);
 
-  // textures & materials
   const texLoader = new THREE.TextureLoader();
   const wallTex = texLoader.load("textures/wall.jpeg");
   wallTex.wrapS = wallTex.wrapT = THREE.RepeatWrapping;
@@ -408,13 +359,11 @@ function init() {
     specular: 0x222222,
   });
 
-  // dungeon
   loadFixedLayout();
   buildDungeonGeometry(wallMat, floorMat);
 
   const gltfLoader = new GLTFLoader();
 
-  // Load the monster glTF
   gltfLoader.load(
     "models/scene.gltf",
     (gltf) => {
@@ -431,7 +380,6 @@ function init() {
     }
   );
 
-  // Load avatars (1-4)
   gltfLoader.load(
     "avatar1/scene.gltf",
     (gltf) => {
@@ -583,13 +531,11 @@ function init() {
     (err) => console.error("Error loading avatar4 GLTF:", err)
   );
 
-  // input
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("keyup", onKeyUp);
   addEventListener("resize", onWindowResize);
 }
 
-/* ─── Name overlay logic ───────────────────────── */
 const nameOverlay = document.getElementById('nameOverlay');
 const startBtn = document.getElementById('startBtn');
 const nameInput = document.getElementById('playerName');
@@ -612,9 +558,6 @@ startBtn.addEventListener('click', () => {
   document.getElementById('blocker').style.display = 'flex';
 });
 
-// ─────────────────────────────────────────────────────────
-// 5) DUNGEON GENERATION
-// ─────────────────────────────────────────────────────────
 function loadFixedLayout() {
   dungeonMap.length = 0;
   treasureSpots.length = 0;
@@ -625,7 +568,7 @@ function loadFixedLayout() {
     dungeonMap[r] = [];
     for (let c = 0; c < DUNGEON_SIZE; c++) {
       const ch = FIXED_LAYOUT[r][c];
-      dungeonMap[r][c] = ch === "#" ? 0 : 1; // wall = 0, floor/S = 1
+      dungeonMap[r][c] = ch === "#" ? 0 : 1;
       if (ch === "S") {
         spawnPos.set((c - half) * 2, playerHeight, (r - half) * 2);
       } else if (ch === "T") {
@@ -671,9 +614,6 @@ function buildDungeonGeometry(wallMat, floorMat) {
   }
 }
 
-// ─────────────────────────────────────────────────────────
-// 6) MONSTER SETUP + RAYCAST VISIBILITY
-// ─────────────────────────────────────────────────────────
 function placeMonsters() {
   if (!monsterGLTF) {
     console.warn("Monster glTF not loaded yet; skipping placeMonsters.");
@@ -747,7 +687,6 @@ function placeMonsters() {
   });
 }
 
-/* 6½) TREASURE SETUP ─────────────────────────────────── */
 function placeDragonBalls(decalTex) {
   const tex = new THREE.TextureLoader().load("textures/dragonball.png");
   tex.minFilter = THREE.LinearMipMapLinearFilter;
@@ -812,9 +751,6 @@ function showPopup(msg) {
   setTimeout(() => popup.remove(), 2000);
 }
 
-// ─────────────────────────────────────────────────────────
-// 7) SOCKET.IO – MULTIPLAYER
-// ─────────────────────────────────────────────────────────
 function initSocketConnection() {
   socket = io();
   socket.on('connect',()=>{
@@ -822,20 +758,30 @@ function initSocketConnection() {
     rememberPlayer(socket.id, name);
     refreshNames();
     socket.emit('setName', name);
+    console.log(`Connected as socket ${socket.id}, name ${name}`);
   });
 
   socket.on("timerUpdate", ({ remaining }) => {
     timerDisplay.innerText = `Time: ${remaining}`;
+    if (!gameEnded && remaining <= 0) {
+      endGame(true);
+    }
   });
 
   socket.on("gamePaused", ({ paused }) => {
-    if (paused) {
-      timerDisplay.innerText += " (Paused)";
+    if (isSoloMode && !gameEnded) {
+      timerDisplay.innerText = timerDisplay.innerText.replace(" (Paused)", "");
+      if (paused) {
+        timerDisplay.innerText += " (Paused)";
+      }
     }
   });
 
   socket.on("gameStarted", () => {
     readyStatusDisplay.style.display = "none";
+    timerDisplay.innerText = timerDisplay.innerText.replace(" (Paused)", "");
+    gameEnded = false;
+    console.log('Game started, timer initialized');
   });
 
   socket.on("readyStatus", ({ readyCount, totalPlayers }) => {
@@ -848,6 +794,7 @@ function initSocketConnection() {
         ? `${readyCount}/${totalPlayers} players ready`
         : `Waiting for host... (${readyCount}/${totalPlayers} ready)`;
     }
+    console.log(`Ready status: ${readyCount}/${totalPlayers}, isSoloMode: ${isSoloMode}, mySlot: ${mySlotIndex}`);
   });
 
   socket.on("gameOver", () => {
@@ -861,6 +808,7 @@ function initSocketConnection() {
       if (p.id === socket.id) {
         mySlotIndex = p.slot;
         controls.getObject().position.copy(spawnSpots[mySlotIndex]);
+        console.log(`Assigned slot ${mySlotIndex} to self (socket ${socket.id})`);
 
         let proto = null;
         if (mySlotIndex === 0) proto = avatarGLTF1;
@@ -1013,9 +961,6 @@ function addOtherPlayer({ id, slot, position, rotation = { y: 0 } }) {
   };
 }
 
-// ─────────────────────────────────────────────────────────
-// 8) INPUT
-// ─────────────────────────────────────────────────────────
 function onKeyDown(e) {
   if (playerDead) return;
   switch (e.code) {
@@ -1065,9 +1010,6 @@ function onKeyUp(e) {
   }
 }
 
-// ─────────────────────────────────────────────────────────
-// 9) MINIMAP RENDERING
-// ─────────────────────────────────────────────────────────
 function updateMinimap() {
   if (!minimapCtx) return;
 
@@ -1076,10 +1018,8 @@ function updateMinimap() {
   const half = DUNGEON_SIZE >> 1;
   const cellSize = canvasWidth / DUNGEON_SIZE;
 
-  // Clear the canvas
   minimapCtx.clearRect(0, 0, canvasWidth, canvasHeight);
 
-  // Draw the dungeon map (walls and floors)
   for (let r = 0; r < DUNGEON_SIZE; r++) {
     for (let c = 0; c < DUNGEON_SIZE; c++) {
       minimapCtx.fillStyle = dungeonMap[r][c] === 0 ? "#444" : "#888";
@@ -1087,7 +1027,6 @@ function updateMinimap() {
     }
   }
 
-  // Draw treasures
   treasureSpots.forEach((spot, idx) => {
     if (!openedTreasures.has(idx)) {
       minimapCtx.fillStyle = "#FFD700";
@@ -1103,7 +1042,6 @@ function updateMinimap() {
     }
   });
 
-  // Draw monsters
   monsters.forEach((monster) => {
     const x = (monster.position.x / 2 + half) * cellSize;
     const z = (monster.position.z / 2 + half) * cellSize;
@@ -1113,7 +1051,6 @@ function updateMinimap() {
     minimapCtx.fill();
   });
 
-  // Draw other players
   for (const id in players) {
     const player = players[id];
     const x = (player.mesh.position.x / 2 + half) * cellSize;
@@ -1124,7 +1061,6 @@ function updateMinimap() {
     minimapCtx.fill();
   }
 
-  // Draw the local player
   const playerPos = controls.getObject().position;
   const px = (playerPos.x / 2 + half) * cellSize;
   const pz = (playerPos.z / 2 + half) * cellSize;
@@ -1134,16 +1070,13 @@ function updateMinimap() {
   minimapCtx.fill();
 }
 
-// ─────────────────────────────────────────────────────────
-// 10) MAIN ANIMATION LOOP
-// ─────────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
 
   const now = performance.now();
   const dt = (now - prevTime) / 1000;
 
-  if (controls.isLocked) {
+  if (controls.isLocked && !gameEnded) {
     if (playerDead) {
       treasureHint.style.display = "none";
       if (myAvatar && myAvatar.userData.action) {
@@ -1156,7 +1089,6 @@ function animate() {
       return;
     }
 
-    // Find nearest treasure
     nearestTreasureIndex = null;
     let minDist = 2.0;
     const playerPos = controls.getObject().position;
@@ -1169,7 +1101,6 @@ function animate() {
       }
     });
 
-    // Show treasure hint
     if (nearestTreasureIndex !== null) {
       const chest = treasures[nearestTreasureIndex];
       let chestWorldPos = chest.position.clone();
@@ -1184,7 +1115,6 @@ function animate() {
       treasureHint.style.display = "none";
     }
 
-    // Movement
     let dirX = 0, dirZ = 0;
     if (moveForward) dirZ -= 1;
     if (moveBackward) dirZ += 1;
@@ -1216,7 +1146,6 @@ function animate() {
       if (walk && walk.isPlaying) walk.stop();
     }
 
-    // Collision
     const curr = controls.getObject().position.clone();
     const cand = curr.clone().add(movement);
     const playerBox = makePlayerBox(cand);
@@ -1231,7 +1160,6 @@ function animate() {
 
     controls.getObject().position.y = playerHeight;
 
-    // Flashlight
     const head = controls.getObject();
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);
@@ -1273,21 +1201,19 @@ function animate() {
       myAvatar.userData.mixer.update(dt);
     }
 
-    // Monster movement
-    const camPosFull = controls.getObject().position.clone();
     monsters.forEach((m) => {
-      const dirToPlayerFull = camPosFull.clone().sub(m.position);
+      const dirToPlayerFull = controls.getObject().position.clone().sub(m.position);
       dirToPlayerFull.y = 0;
       const horizDist = dirToPlayerFull.length();
       let canSee = false;
       if (horizDist < MONSTER_SIGHT) {
         const rayOrigin = m.position.clone().add(new THREE.Vector3(0, 0.5, 0));
-        const fullDir = camPosFull.clone().sub(m.position).normalize();
+        const fullDir = controls.getObject().position.clone().sub(m.position).normalize();
         raycaster.set(rayOrigin, fullDir);
         const hit = raycaster.intersectObjects(objects, true)[0];
         canSee =
           !hit ||
-          hit.distance > camPosFull.clone().sub(m.position).length() - 0.3;
+          hit.distance > controls.getObject().position.clone().sub(m.position).length() - 0.3;
       }
       m.chasing = canSee;
 
@@ -1348,7 +1274,7 @@ function animate() {
         } else {
           m.position.copy(candPos);
           m.mesh.lookAt(
-            new THREE.Vector3(camPosFull.x, candPos.y, camPosFull.z)
+            new THREE.Vector3(controls.getObject().position.x, candPos.y, controls.getObject().position.z)
           );
         }
       } else {
@@ -1378,7 +1304,6 @@ function animate() {
       if (m) m.update(dt);
     }
 
-    // Broadcast movement
     if (now % 50 < dt * 1000) {
       const p = controls.getObject().position;
       const r = camera.rotation;
@@ -1388,7 +1313,6 @@ function animate() {
       });
     }
 
-    // Update minimap
     updateMinimap();
   }
 
@@ -1396,9 +1320,6 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-// ─────────────────────────────────────────────────────────
-// 11) PLAYER RANKING
-// ─────────────────────────────────────────────────────────
 let rankingPanel = document.createElement("div");
 rankingPanel.style.position = "absolute";
 rankingPanel.style.right = "30px";
@@ -1426,6 +1347,7 @@ function refreshRanking() {
     const icon =
         r.slot === 0 ? "🧙‍♂️" :
         r.slot === 1 ? "🧑" :
+        r.slot === 1 ? "🧑" :
         r.slot === 2 ? "🦸‍♂️" :
         r.slot === 3 ? "🎥" : "🧑";
     const you = r.id === socket.id ? " <b>(You)</b>" : "";
@@ -1439,18 +1361,12 @@ function refreshRanking() {
   window.lastPlayersInfo = rows;
 }
 
-// ─────────────────────────────────────────────────────────
-// 12) RESIZE
-// ─────────────────────────────────────────────────────────
 function onWindowResize() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 }
 
-// ─────────────────────────────────────────────────────────
-// 13) Game Over
-// ─────────────────────────────────────────────────────────
 function endGame(isTimeout = false) {
   if (gameEnded) return;
   gameEnded = true;
@@ -1551,9 +1467,11 @@ function getRankingHTML() {
       <div style="margin-bottom:7px;display:flex;align-items:center;gap:8px">
         <span style="font-size:22px">${avatarIcon}</span>
         <span style="flex:1">${name}</span>
-        <span style="color:#FFD700;font-weight:bold">${info.coins}</span>
-        ${you}
+        <span style="color:#FFD700;font-weight:bold">${info.coins}</span>${you}
       </div>`;
   });
   return html;
 }
+
+init();
+animate();
