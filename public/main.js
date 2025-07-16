@@ -1,26 +1,18 @@
-//Version 1.0
-
-import * as THREE from "three"; // via <script type="importmap">
+import * as THREE from "three";
 import { FIXED_LAYOUT, spawnSpots } from "./layout.js";
 import { PointerLockControls } from "https://unpkg.com/three@0.160.0/examples/jsm/controls/PointerLockControls.js";
-
-// Added for 3D model
 import { GLTFLoader } from "https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "https://unpkg.com/three@0.160.0/examples/jsm/utils/SkeletonUtils.js";
 import { DecalGeometry } from "https://unpkg.com/three@0.160.0/examples/jsm/geometries/DecalGeometry.js";
 
-// socket.io is injected in index.html
 let socket;
 let mySlotIndex = null;
 let loadedAvatars = 0;
+let isSoloMode = false;
 
-// ─────────────────────────────────────────────────────────
-// 2) GLOBALS
-// ─────────────────────────────────────────────────────────
 let camera, scene, renderer, controls;
-let raycaster = new THREE.Raycaster(); // still used for monster LOS
+let raycaster = new THREE.Raycaster();
 let spawnPos = new THREE.Vector3();
-let treasureMesh;
 let torch;
 let avatarGLTF1 = null;
 let avatarGLTF2 = null;
@@ -45,17 +37,17 @@ const monsters = [];
 const monsterClones = [];
 const treasures = [];
 
-const objects = []; // wall meshes  (for lighting / LOS)
-const wallBoxes = []; // AABBs for capsule–wall collision                ★ NEW
-const players = {}; // remote avatars
+const objects = [];
+const wallBoxes = [];
+const players = {};
 
-const MONSTER_SPEED = 2.0; // m · s-1  (walking pace)
-const MONSTER_SIGHT = 18.0; // meters   (how far they can “see”)
+const MONSTER_SPEED = 2.0;
+const MONSTER_SIGHT = 18.0;
 const MONSTER_RADIUS = 0.4;
 
-const SPEED = 5; // m·s-1
-const playerHeight = 1.6; // eye height above floor
-const PLAYER_RADIUS = 0.4; // ★ NEW
+const SPEED = 5;
+const playerHeight = 1.6;
+const PLAYER_RADIUS = 0.4;
 
 const listener = new THREE.AudioListener();
 const audioLoader = new THREE.AudioLoader();
@@ -67,22 +59,22 @@ let moveForward = false,
 
 let prevTime = performance.now();
 
-// dungeon map
-const DUNGEON_SIZE = 41; // must be odd
-let dungeonMap = []; // 0 wall | 1 floor
+const DUNGEON_SIZE = 41;
+let dungeonMap = [];
 
-// Monster sprite + visibility
-let monsterSprite;
-let monsterPosition = new THREE.Vector3();
-let monsterVisible = false;
-
-// Added for 3D model
 let monsterGLTF = null;
 let monsterMixer = null;
 let monsterClips = null;
 const clipIndexByName = {};
 
-// Open Treasures - Collect Coins
+let minimapCanvas, minimapCtx;
+minimapCanvas = document.getElementById("minimap");
+if (minimapCanvas) {
+  minimapCtx = minimapCanvas.getContext("2d");
+} else {
+  console.warn("Minimap canvas not found");
+}
+
 let goldCount = 0;
 let openedTreasures = new Set();
 let nearestTreasureIndex = null;
@@ -101,12 +93,44 @@ coinDisplay.style.zIndex = "200";
 coinDisplay.innerText = "🪙 Gold: 0";
 document.body.appendChild(coinDisplay);
 
-// Refresh UI
 function updateCoinDisplay() {
   coinDisplay.innerText = `🪙 Gold: ${goldCount}`;
 }
 
-// hint when player is close to treasure
+const namesPanel = document.getElementById('namesPanel') || (() => {
+  const div = document.createElement('div');
+  div.id = 'namesPanel';
+  div.style.cssText = `
+  position:absolute; left:30px; bottom:30px;
+  background:rgba(0,0,0,.8); color:#fff; font-size:18px;
+  padding:16px 26px; border-radius:12px; z-index:800;
+  min-width:200px; line-height:1.4`;
+  div.innerHTML = '<b>Players</b><br>';
+  document.body.appendChild(div);
+  return div;
+})();
+
+document.querySelectorAll('#namesPanel').forEach((el,i)=> i && el.remove());
+
+const playerNames = {};
+const coinsById = {};
+const joinOrder = [];
+
+function refreshNames() {
+  namesPanel.innerHTML =
+    '<b>Players</b><br>' +
+    joinOrder
+      .filter(id => playerNames[id])
+      .map(id => `• ${playerNames[id]} (Slot ${players[id]?.slot ?? (id === socket.id ? mySlotIndex : '?')})${id === socket.id ? ' (You)' : ''}${players[id]?.slot === 0 ? ' (Host)' : ''}`)
+      .join('<br>');
+}
+
+function rememberPlayer(id, name='Anon') {
+  if (!playerNames[id]) joinOrder.push(id);
+  playerNames[id] = name;
+  if (coinsById[id] == null) coinsById[id] = 0;
+}
+
 let treasureHint = document.createElement("div");
 treasureHint.style.position = "absolute";
 treasureHint.style.pointerEvents = "none";
@@ -121,11 +145,9 @@ treasureHint.style.zIndex = "150";
 treasureHint.innerText = "Press E to open treasure";
 document.body.appendChild(treasureHint);
 
-// Health Bar (3 lives for 1 player)
 let playerLives = 3;
 const maxLives = 3;
 let playerDead = false;
-// health bar
 let healthBar = document.createElement("div");
 healthBar.style.position = "absolute";
 healthBar.style.top = "20px";
@@ -144,7 +166,6 @@ healthBar.style.textShadow = "0 2px 10px #000";
 document.body.appendChild(healthBar);
 
 function updateHealthBar() {
-  // 3 heart represent player's lives
   let hearts = "";
   for (let i = 0; i < playerLives; ++i) hearts += "❤️ ";
   for (let i = playerLives; i < maxLives; ++i) hearts += "🤍 ";
@@ -152,11 +173,6 @@ function updateHealthBar() {
 }
 updateHealthBar();
 
-// Game Duration - Timer
-let gameDuration = 120; // seconds
-let gameTimerInterval = null;
-let timerRunning = false; // set is the timer counting down
-let gameTimeLeft = gameDuration; // seconds
 let timerDisplay = document.createElement("div");
 timerDisplay.style.position = "absolute";
 timerDisplay.style.top = "20px";
@@ -174,31 +190,22 @@ timerDisplay.innerText = "Time: 120";
 document.body.appendChild(timerDisplay);
 let gameEnded = false;
 
-function startGameTimer() {
-  if (timerRunning || gameEnded) return;
-  timerRunning = true;
-  gameTimerInterval = setInterval(() => {
-    if (gameEnded) return;
-    gameTimeLeft--;
-    if (gameTimeLeft < 0) gameTimeLeft = 0;
-    timerDisplay.innerText = `Time: ${gameTimeLeft}`;
-    if (gameTimeLeft === 0) {
-      endGame(true);
-    }
-  }, 1000);
-}
+let readyStatusDisplay = document.createElement("div");
+readyStatusDisplay.id = "readyStatusDisplay";
+readyStatusDisplay.style.position = "absolute";
+readyStatusDisplay.style.top = "60px";
+readyStatusDisplay.style.right = "32px";
+readyStatusDisplay.style.background = "rgba(0,0,0,0.6)";
+readyStatusDisplay.style.color = "#FFF";
+readyStatusDisplay.style.fontWeight = "bold";
+readyStatusDisplay.style.fontSize = "18px";
+readyStatusDisplay.style.padding = "6px 18px";
+readyStatusDisplay.style.borderRadius = "14px";
+readyStatusDisplay.style.zIndex = "500";
+readyStatusDisplay.style.display = "none";
+document.body.appendChild(readyStatusDisplay);
 
-function pauseGameTimer() {
-  timerRunning = false;
-  if (gameTimerInterval) clearInterval(gameTimerInterval);
-  gameTimerInterval = null;
-}
-
-// ─────────────────────────────────────────────────────────
-// 3) HELPER — capsule-like AABB for the player
-// ─────────────────────────────────────────────────────────
 function makePlayerBox(pos) {
-  // ★ NEW
   return new THREE.Box3(
     new THREE.Vector3(
       pos.x - PLAYER_RADIUS,
@@ -212,58 +219,31 @@ function makePlayerBox(pos) {
 function onAvatarLoaded() {
   loadedAvatars++;
   if (loadedAvatars === 4) {
-    // now all avatarGLTF1–4 are non-null
     initSocketConnection();
   }
 }
 
-// ─── DRAGONBALL SPHERE SETUP ──────────────────────────────────
-// 1) Sphere geometry (smooth enough for decals)
 const dragonGeo = new THREE.SphereGeometry(0.5, 64, 64);
-
-// 2) Base material (the “orange” ball)
 const dragonMat = new THREE.MeshStandardMaterial({
   color: 0xffc63f,
   metalness: 0,
   roughness: 0.7,
 });
 
-// 3) Load the seven-star decal texture (PNG with alpha!)
 new THREE.TextureLoader().load(
   "textures/dragonball.png",
-  // onLoad callback:
   (decalTex) => {
     decalTex.minFilter = THREE.LinearMipMapLinearFilter;
     decalTex.magFilter = THREE.LinearFilter;
     decalTex.wrapS = decalTex.wrapT = THREE.ClampToEdgeWrapping;
-
-    // Now that the texture is ready, place your treasures
     placeDragonBalls(decalTex);
   },
   undefined,
   (err) => console.error("Failed to load dragonball.png:", err)
 );
 
-// // 4) Decal material (pushes it just above the sphere to avoid z-fighting)
-// const decalMat = new THREE.MeshBasicMaterial({
-//   map: decalTex,
-//   transparent: true,
-//   depthTest: true,
-//   depthWrite: false,
-//   polygonOffset: true,
-//   polygonOffsetFactor: -4,
-// });
-
-// ─────────────────────────────────────────────────────────
-// 4) MAIN SET-UP
-// ─────────────────────────────────────────────────────────
-init();
-animate();
-
 function init() {
-  // scene / camera / renderer
   scene = new THREE.Scene();
-  //scene.background = new THREE.Color(0x111111);
   scene.background = new THREE.Color(0x000000);
   scene.fog = new THREE.Fog(0x000000, 18, 40);
   scene.userData.lastRaptorTime = 0;
@@ -273,15 +253,12 @@ function init() {
 
   camera.add(listener);
 
-  // 2️⃣ Background music (non‐positional, plays in loop)
   const bgm = new THREE.Audio(listener);
   audioLoader.load("sounds/bgm.mp3", (buffer) => {
     bgm.setBuffer(buffer);
     bgm.setLoop(true);
     bgm.setVolume(0.3);
-    bgm.play();
   });
-  // store for later if you need to pause/stop
   scene.userData.bgm = bgm;
 
   const walkSound = new THREE.Audio(listener);
@@ -289,9 +266,7 @@ function init() {
     walkSound.setBuffer(buffer);
     walkSound.setLoop(true);
     walkSound.setVolume(1.2);
-    // don’t play yet
   });
-  // store for later control
   scene.userData.walkSound = walkSound;
 
   const coinSound = new THREE.Audio(listener);
@@ -302,12 +277,11 @@ function init() {
   });
   scene.userData.coinSound = coinSound;
 
-  renderer.shadowMap.enabled = true; // enable shadow maps
+  renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.setSize(innerWidth, innerHeight);
   document.body.appendChild(renderer.domElement);
 
-  // controls
   controls = new PointerLockControls(camera, document.body);
   const blocker = document.getElementById("blocker");
   const instructions = document.getElementById("instructions");
@@ -315,56 +289,56 @@ function init() {
   instructions.addEventListener("click", () => controls.lock());
   controls.addEventListener("lock", () => {
     const bgm = scene.userData.bgm;
-    if (bgm && !bgm.isPlaying) bgm.play();
+    if (bgm && bgm.buffer && !bgm.isPlaying) bgm.play();
     blocker.style.display = "none";
     instructions.style.display = "none";
-    startGameTimer();
+    if (socket && socket.connected) {
+      socket.emit('playerReady');
+      if (mySlotIndex === 0 || isSoloMode) {
+        socket.emit('startGame');
+      }
+      if (isSoloMode) {
+        socket.emit('resumeGame');
+      }
+    }
   });
   controls.addEventListener("unlock", () => {
     const bgm = scene.userData.bgm;
     if (bgm && bgm.isPlaying) bgm.stop();
     blocker.style.display = "flex";
     instructions.style.display = "";
-    pauseGameTimer();
+    if (socket && socket.connected && isSoloMode) {
+      socket.emit('pauseGame');
+    }
+    if (!isSoloMode) {
+      showPopup("Pause disabled in multiplayer");
+    }
   });
 
   scene.add(controls.getObject());
   controls.getObject().position.set(0, playerHeight, 0);
 
-  // lighting
-  //   scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.8));
-  //   const torch = new THREE.PointLight(0xffaa33, 1, 10);
-  //   torch.position.set(0,3,0);
-  //   scene.add(torch);
-  // ── LIGHTING ───────────────────────────────────────
-
-  // 1. Tiny ambient so walls aren't 100 % black
   scene.add(new THREE.AmbientLight(0x111111, 0.3));
-
-  // 2. Player’s flashlight: a SpotLight
   torch = new THREE.SpotLight(
-    0xffddaa, // warm colour
-    3.0, // intensity
-    150, // range (meters)
-    Math.PI / 4, // inner cone (~25°)
-    0.4, // penumbra softness
+    0xffddaa,
+    3.0,
+    150,
+    Math.PI / 4,
+    0.4,
     1.0
-  ); // decay (phys-correct)
-
-  torch.castShadow = true; // optional, costs a bit of GPU
+  );
+  torch.castShadow = true;
   torch.angle = Math.PI / 3;
   torch.shadow.camera.near = 0.2;
   torch.shadow.camera.far = 40;
   torch.shadow.camera.updateProjectionMatrix();
-  torch.shadow.bias = -0.0003; // reduce acne
-  torch.shadow.mapSize.width = 2048; // increase for crisper shadows
+  torch.shadow.bias = -0.0003;
+  torch.shadow.mapSize.width = 2048;
   torch.shadow.mapSize.height = 2048;
   torch.shadow.mapSize.set(512, 512);
-
   scene.add(torch);
   scene.add(torch.target);
 
-  // textures & materials
   const texLoader = new THREE.TextureLoader();
   const wallTex = texLoader.load("textures/wall.jpeg");
   wallTex.wrapS = wallTex.wrapT = THREE.RepeatWrapping;
@@ -385,31 +359,20 @@ function init() {
     specular: 0x222222,
   });
 
-  // dungeon
   loadFixedLayout();
   buildDungeonGeometry(wallMat, floorMat);
-  //controls.getObject().position.copy(spawnPos);
 
   const gltfLoader = new GLTFLoader();
 
-  // ─── LOAD THE MONSTER glTF ─────────────────────────────────
   gltfLoader.load(
     "models/scene.gltf",
     (gltf) => {
-      console.log(gltf.animations);
-      monsterGLTF = gltf.scene; // hold the master
+      monsterGLTF = gltf.scene;
       monsterClips = gltf.animations;
-
-      // OPTIONAL: if there are animations in the glTF:
-      // if (gltf.animations && gltf.animations.length > 0) {
-      //   monsterMixer = new THREE.AnimationMixer(monsterGLTF);
-      //   monsterMixer.clipAction(gltf.animations[0], monsterGLTF).play();
-      // }
       monsterClips.forEach((clip, i) => {
         clipIndexByName[clip.name] = i;
       });
-
-      placeMonsters(); // now that the model is loaded, populate monsters
+      placeMonsters();
     },
     undefined,
     (error) => {
@@ -417,65 +380,38 @@ function init() {
     }
   );
 
-  // ─── LOAD THE AVATAR1 glTF ───────────────────────────
   gltfLoader.load(
     "avatar1/scene.gltf",
     (gltf) => {
       avatarGLTF1 = gltf.scene;
       avatarClips1 = gltf.animations;
       avatarGLTF1.userData.clips = gltf.animations;
-      console.log(gltf.animations);
-
-      // ── STEP 1: Measure the raw height (before scaling) ──────────────────
       scene.add(avatarGLTF1);
       avatarGLTF1.updateWorldMatrix(true, true);
       const rawBox = new THREE.Box3().setFromObject(avatarGLTF1);
-      const rawHeight = rawBox.max.y - rawBox.min.y; // model’s “unscaled” height
-
-      // ── STEP 2: Uniformly scale so total height ≈ playerHeight (1.6 m) ─
-      const scale = playerHeight / rawHeight; // e.g. 1.6 ÷ (rawHeight)
+      const rawHeight = rawBox.max.y - rawBox.min.y;
+      const scale = playerHeight / rawHeight;
       avatarGLTF1.scale.setScalar(scale);
-
-      // ── STEP 3: After scaling, compute the new “foot” y and the “head” y ─
       avatarGLTF1.updateWorldMatrix(true, true);
       const scaledBox = new THREE.Box3().setFromObject(avatarGLTF1);
-      const footY = scaledBox.min.y; // local Y of foot‐sole after scaling
-      const headY_in_local = scaledBox.max.y; // local Y of head top after scaling
-
-      // Drop feet onto Y = 0 (floor):
+      const footY = scaledBox.min.y;
+      const headY_in_local = scaledBox.max.y;
       avatarGLTF1.position.y -= footY;
-
       scene.remove(avatarGLTF1);
       scene.add(avatarGLTF1);
-
       avatarGLTF1.userData.headY = headY_in_local;
-
-      // ROTATE so its “forward” faces camera’s forward. Tweak if needed:
-      // e.g. Math.PI = 180°, Math.PI/2 = 90°, etc.
-      const initialYaw = Math.PI / 2;
-      //avatarGLTF.rotation.y = initialYaw;
-      //avatarGLTF.userData.yawOffset = initialYaw;
-
-      // ── STEP 5: Create the AnimationMixer but do NOT call .play() yet ─
       avatarMixer = new THREE.AnimationMixer(avatarGLTF1);
       const clip = avatarClips1.find((c) => c.name === AVATAR_ANIM);
       if (!clip) {
-        console.warn(
-          "Avatar1 clip not found:",
-          avatarClips1.map((c) => c.name)
-        );
+        console.warn("Avatar1 clip not found:", avatarClips1.map((c) => c.name));
         return;
       }
-
       avatarAction = avatarMixer.clipAction(clip);
       avatarAction.setLoop(THREE.LoopRepeat, Infinity);
       avatarAction.clampWhenFinished = true;
-
-      // start paused at first frame:
       avatarAction.paused = true;
       avatarAction.time = 0;
       avatarAction.play();
-
       console.log("Avatar1 action ready (paused).");
       onAvatarLoaded();
     },
@@ -483,263 +419,145 @@ function init() {
     (err) => console.error("Error loading avatar1 GLTF:", err)
   );
 
-  // Player 2 = normal man
   gltfLoader.load(
     "avatar2/scene.gltf",
     (gltf) => {
       avatarGLTF2 = gltf.scene;
       avatarClips2 = gltf.animations;
       avatarGLTF2.userData.clips = gltf.animations;
-      console.log(gltf.animations);
-
-      // ── STEP 1: Measure the raw height (before scaling) ──────────────────
-
       scene.add(avatarGLTF2);
       avatarGLTF2.updateWorldMatrix(true, true);
       const rawBox = new THREE.Box3().setFromObject(avatarGLTF2);
-      const rawHeight = rawBox.max.y - rawBox.min.y; // model’s “unscaled” height
-
-      // ── STEP 2: Uniformly scale so total height ≈ playerHeight (1.6 m) ─
-      //const scale = playerHeight / rawHeight;              // e.g. 1.6 ÷ (rawHeight)
-      // console.log('scale:', scale);
-      // console.log('raw height:', rawHeight);
+      const rawHeight = rawBox.max.y - rawBox.min.y;
       avatarGLTF2.scale.setScalar(1.1);
-
-      // ── STEP 3: After scaling, compute the new “foot” y and the “head” y ─
       avatarGLTF2.updateWorldMatrix(true, true);
-      const scaledBox = new THREE.Box3().setFromObject(avatarGLTF2);
-      const footY = 0.09; // local Y of foot‐sole after scaling
-      const headY_in_local = 1.694; // local Y of head top after scaling
-      // console.log('footY:', footY);
-      // console.log('headY_in_local:', headY_in_local);
-
-      // Drop feet onto Y = 0 (floor):
+      const footY = 0.09;
+      const headY_in_local = 1.694;
       avatarGLTF2.position.y -= footY;
-
       scene.remove(avatarGLTF2);
       scene.add(avatarGLTF2);
-
       avatarGLTF2.userData.headY = headY_in_local;
-
-      // ROTATE so its “forward” faces camera’s forward. Tweak if needed:
-      // e.g. Math.PI = 180°, Math.PI/2 = 90°, etc.
-      //const initialYaw = Math.PI/2;
-      //avatarGLTF.rotation.y = initialYaw;
-      //avatarGLTF.userData.yawOffset = initialYaw;
-
-      // ── STEP 5: Create the AnimationMixer but do NOT call .play() yet ─
       avatarMixer = new THREE.AnimationMixer(avatarGLTF2);
       const clip = avatarClips2.find((c) => c.name === AVATAR_ANIM2);
       if (!clip) {
-        console.warn(
-          "Avatar2 clip not found:",
-          avatarClips2.map((c) => c.name)
-        );
+        console.warn("Avatar2 clip not found:", avatarClips2.map((c) => c.name));
         return;
       }
-
       avatarAction = avatarMixer.clipAction(clip);
       avatarAction.setLoop(THREE.LoopRepeat, Infinity);
       avatarAction.clampWhenFinished = true;
-
-      // start paused at first frame:
       avatarAction.paused = true;
       avatarAction.time = 0;
       avatarAction.play();
-
       console.log("Avatar2 action ready (paused).");
       onAvatarLoaded();
     },
     undefined,
-    (err) => console.error("Error loading avatar GLTF:", err)
+    (err) => console.error("Error loading avatar2 GLTF:", err)
   );
 
-  //player3 = naruto
   gltfLoader.load(
     "avatar3/scene.gltf",
     (gltf) => {
       avatarGLTF3 = gltf.scene;
       avatarClips3 = gltf.animations;
       avatarGLTF3.userData.clips = gltf.animations;
-      console.log(gltf.animations);
-
-      // ── STEP 1: Measure the raw height (before scaling) ──────────────────
-
       scene.add(avatarGLTF3);
       avatarGLTF3.updateWorldMatrix(true, true);
       const rawBox = new THREE.Box3().setFromObject(avatarGLTF3);
-      const rawHeight = rawBox.max.y - rawBox.min.y; // model’s “unscaled” height
-
-      // ── STEP 2: Uniformly scale so total height ≈ playerHeight (1.6 m) ─
+      const rawHeight = rawBox.max.y - rawBox.min.y;
       avatarGLTF3.scale.setScalar(0.6);
-
-      // ── STEP 3: After scaling, compute the new “foot” y and the “head” y ─
       avatarGLTF3.updateWorldMatrix(true, true);
-      const footY = 0.09; // local Y of foot‐sole after scaling
-      const headY_in_local = 1.694; // local Y of head top after scaling
-
-      // Drop feet onto Y = 0 (floor):
+      const footY = 0.09;
+      const headY_in_local = 1.694;
       avatarGLTF3.position.y -= footY;
-
       scene.remove(avatarGLTF3);
       scene.add(avatarGLTF3);
-
       avatarGLTF3.userData.headY = headY_in_local;
-
-      // ROTATE so its “forward” faces camera’s forward. Tweak if needed:
-      // e.g. Math.PI = 180°, Math.PI/2 = 90°, etc.
-      const initialYaw = Math.PI / 2;
-      //avatarGLTF.rotation.y = initialYaw;
-      //avatarGLTF.userData.yawOffset = initialYaw;
-
-      // ── STEP 5: Create the AnimationMixer but do NOT call .play() yet ─
       avatarMixer = new THREE.AnimationMixer(avatarGLTF3);
       const clip = avatarClips3.find((c) => c.name === AVATAR_ANIM3);
       if (!clip) {
-        console.warn(
-          "Avatar2 clip not found:",
-          avatarClips3.map((c) => c.name)
-        );
+        console.warn("Avatar3 clip not found:", avatarClips3.map((c) => c.name));
         return;
       }
-
       avatarAction = avatarMixer.clipAction(clip);
       avatarAction.setLoop(THREE.LoopRepeat, Infinity);
       avatarAction.clampWhenFinished = true;
-
-      // start paused at first frame:
       avatarAction.paused = true;
       avatarAction.time = 0;
       avatarAction.play();
-
       console.log("Avatar3 action ready (paused).");
-
       onAvatarLoaded();
     },
     undefined,
-    (err) => console.error("Error loading avatar GLTF3:", err)
+    (err) => console.error("Error loading avatar3 GLTF:", err)
   );
 
-  //player4 = cameraman
   gltfLoader.load(
     "avatar4/scene.gltf",
     (gltf) => {
       avatarGLTF4 = gltf.scene;
       avatarClips4 = gltf.animations;
       avatarGLTF4.userData.clips = gltf.animations;
-      console.log(gltf.animations);
-
-      // ── STEP 1: Measure the raw height (before scaling) ──────────────────
-
       scene.add(avatarGLTF4);
       avatarGLTF4.updateWorldMatrix(true, true);
       const rawBox = new THREE.Box3().setFromObject(avatarGLTF4);
-      const rawHeight = rawBox.max.y - rawBox.min.y; // model’s “unscaled” height
-
-      // ── STEP 2: Uniformly scale so total height ≈ playerHeight (1.6 m) ─
-      const scale = playerHeight / rawHeight; // e.g. 1.6 ÷ (rawHeight)
+      const rawHeight = rawBox.max.y - rawBox.min.y;
+      const scale = playerHeight / rawHeight;
       avatarGLTF4.scale.setScalar(scale);
-
-      // ── STEP 3: After scaling, compute the new “foot” y and the “head” y ─
       avatarGLTF4.updateWorldMatrix(true, true);
       const footY = 0.09;
       const headY_in_local = 1.694;
-
-      // Drop feet onto Y = 0 (floor):
       avatarGLTF4.position.y -= footY;
-
       scene.remove(avatarGLTF4);
       scene.add(avatarGLTF4);
-
       avatarGLTF4.userData.headY = headY_in_local;
-
-      // ── STEP 5: Create the AnimationMixer but do NOT call .play() yet ─
       avatarMixer = new THREE.AnimationMixer(avatarGLTF4);
       const clip = avatarClips4.find((c) => c.name === AVATAR_ANIM4);
       if (!clip) {
-        console.warn(
-          "Avatar clip not found:",
-          avatarClips4.map((c) => c.name)
-        );
+        console.warn("Avatar4 clip not found:", avatarClips4.map((c) => c.name));
         return;
       }
-
       avatarAction = avatarMixer.clipAction(clip);
       avatarAction.setLoop(THREE.LoopRepeat, Infinity);
       avatarAction.clampWhenFinished = true;
-
-      // start paused at first frame:
       avatarAction.paused = true;
       avatarAction.time = 0;
       avatarAction.play();
-
       console.log("Avatar4 action ready (paused).");
-
       onAvatarLoaded();
     },
     undefined,
     (err) => console.error("Error loading avatar4 GLTF:", err)
   );
 
-  //placeTreasures(texLoader);
-  console.log("treasures:", treasures);
-
-  // multiplayer
-  // initSocketConnection();
-
-  // input
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("keyup", onKeyUp);
   addEventListener("resize", onWindowResize);
 }
 
-// ─────────────────────────────────────────────────────────
-// 5) DUNGEON GENERATION
-// ─────────────────────────────────────────────────────────
-function generateDungeon() {
-  // Fill everything with walls
-  for (let r = 0; r < DUNGEON_SIZE; r++) {
-    dungeonMap[r] = [];
-    for (let c = 0; c < DUNGEON_SIZE; c++) dungeonMap[r][c] = 0;
-  }
-  // drunken walk
-  let x = DUNGEON_SIZE >> 1,
-    y = DUNGEON_SIZE >> 1;
-  dungeonMap[y][x] = 1;
-  let carved = 1;
-  const targetFloors = Math.floor(DUNGEON_SIZE * DUNGEON_SIZE * 0.45);
-  while (carved < targetFloors) {
-    switch ((Math.random() * 4) | 0) {
-      case 0:
-        if (x > 1) x--;
-        break;
-      case 1:
-        if (x < DUNGEON_SIZE - 2) x++;
-        break;
-      case 2:
-        if (y > 1) y--;
-        break;
-      case 3:
-        if (y < DUNGEON_SIZE - 2) y++;
-        break;
-    }
-    if (!dungeonMap[y][x]) {
-      dungeonMap[y][x] = 1;
-      carved++;
-    }
-  }
-}
+const nameOverlay = document.getElementById('nameOverlay');
+const startBtn = document.getElementById('startBtn');
+const nameInput = document.getElementById('playerName');
 
-// function loadFixedLayout() {
-//   dungeonMap = [];
+startBtn.addEventListener('click', () => {
+  const typed = (nameInput.value || '').trim().slice(0, 16) || 'Anon';
+  rememberPlayer(socket?.id || 'local', typed);
+  refreshNames();
+  window.myPlayerName = typed;
+  if (socket && socket.connected) {
+    socket.emit('setName', typed);
+  } else {
+    window.pendingName = typed;
+  }
+  listener.context.resume().then(() => {
+    const bgm = scene.userData.bgm;
+    if (bgm && !bgm.isPlaying) bgm.play();
+  });
+  nameOverlay.style.display = 'none';
+  document.getElementById('blocker').style.display = 'flex';
+});
 
-//   for (let r = 0; r < DUNGEON_SIZE; r++) {
-//     dungeonMap[r] = [];
-//     for (let c = 0; c < DUNGEON_SIZE; c++) {
-//       dungeonMap[r][c] = (FIXED_LAYOUT[r][c] === '#') ? 0 : 1;  // 0 = wall, 1 = floor
-//     }
-//   }
-// }
 function loadFixedLayout() {
   dungeonMap.length = 0;
   treasureSpots.length = 0;
@@ -750,13 +568,10 @@ function loadFixedLayout() {
     dungeonMap[r] = [];
     for (let c = 0; c < DUNGEON_SIZE; c++) {
       const ch = FIXED_LAYOUT[r][c];
-      dungeonMap[r][c] = ch === "#" ? 0 : 1; // wall = 0, floor/S = 1
-
-      // catch the spawn tile
+      dungeonMap[r][c] = ch === "#" ? 0 : 1;
       if (ch === "S") {
         spawnPos.set((c - half) * 2, playerHeight, (r - half) * 2);
       } else if (ch === "T") {
-        // treasure spot
         treasureSpots.push({ r, c });
       } else if (ch === "M") {
         monsterSpots.push({ r, c });
@@ -775,7 +590,6 @@ function buildDungeonGeometry(wallMat, floorMat) {
       const worldZ = (r - half) * 2;
 
       if (dungeonMap[r][c] === 0) {
-        // Wall block
         const wall = new THREE.Mesh(
           new THREE.BoxGeometry(2, wallH, 2),
           wallMat
@@ -785,14 +599,11 @@ function buildDungeonGeometry(wallMat, floorMat) {
         wall.castShadow = false;
         scene.add(wall);
         objects.push(wall);
-
-        // AABB (shrunk by 5 cm so “touch” isn’t collision)          ★ CHANGED
         wall.updateMatrixWorld();
         wallBoxes.push(
           new THREE.Box3().setFromObject(wall).expandByScalar(0.15)
         );
       } else {
-        // Floor tile
         const floor = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), floorMat);
         floor.rotation.x = -Math.PI / 2;
         floor.position.set(worldX, 0, worldZ);
@@ -803,10 +614,6 @@ function buildDungeonGeometry(wallMat, floorMat) {
   }
 }
 
-// ─────────────────────────────────────────────────────────
-// 6) MONSTER SETUP + RAYCAST VISIBILITY
-// ─────────────────────────────────────────────────────────
-/* 6)  MONSTER SETUP ───────────────────────────────────── */
 function placeMonsters() {
   if (!monsterGLTF) {
     console.warn("Monster glTF not loaded yet; skipping placeMonsters.");
@@ -818,45 +625,38 @@ function placeMonsters() {
   }
 
   const half = DUNGEON_SIZE >> 1;
-
-  const idleIndex = clipIndexByName["idle"]; // e.g. 4
-  const runIndex = clipIndexByName["run"]; // e.g. 0
+  const idleIndex = clipIndexByName["idle"];
+  const runIndex = clipIndexByName["run"];
   const biteIndex = clipIndexByName["attack_tail"];
 
   monsterSpots.forEach((cell) => {
-    // Clone the loaded glTF (use SkeletonUtils for skinned meshes)
     const monsterClone = SkeletonUtils.clone(monsterGLTF);
     monsterClone.traverse((node) => {
       if (node.isMesh) {
-        node.castShadow = true; // dino throws a shadow
-        node.receiveShadow = true; // optional: dino can receive shadows
+        node.castShadow = true;
+        node.receiveShadow = true;
       }
     });
 
-    // Compute world‐coordinates
     const x = (cell.c - half) * 2;
     const z = (cell.r - half) * 2;
     monsterClone.position.set(x, 0, z);
-    monsterClone.scale.set(1.0, 1.0, 1.0); // adjust monster sizes
+    monsterClone.scale.set(1.0, 1.0, 1.0);
 
-    // ─── attach a positional “trex” roar sound to this clone
     const roar = new THREE.PositionalAudio(listener);
     audioLoader.load("sounds/trex.mp3", (buffer) => {
       roar.setBuffer(buffer);
-      roar.setRefDistance(8); // how quickly it falls off
+      roar.setRefDistance(8);
       roar.setVolume(1.0);
     });
     monsterClone.add(roar);
 
-    // Add clone to the scene:
     scene.add(monsterClone);
     const monsterBox = new THREE.Box3()
       .setFromObject(monsterClone)
       .expandByScalar(0.05);
 
     const mixerClone = new THREE.AnimationMixer(monsterClone);
-
-    // 4) Build one action per clip:
     const actions = monsterClips.map((clip, idx) => {
       const action = mixerClone.clipAction(clip, monsterClone);
       action.enabled = true;
@@ -865,18 +665,16 @@ function placeMonsters() {
       return action;
     });
 
-    // 5) Play the "idle" animation immediately:
     actions[idleIndex].reset().play();
 
-    // Store each monster’s data for AI & collision:
     monsters.push({
       mesh: monsterClone,
       roar: roar,
       mixer: mixerClone,
-      actions: actions, // <-- store the array of AnimationActions
-      current: idleIndex, // <-- index of the clip currently playing
-      idleIndex: idleIndex, // <-- index of the "idle" clip
-      runIndex: runIndex, // <-- index of the "run" clip
+      actions: actions,
+      current: idleIndex,
+      idleIndex: idleIndex,
+      runIndex: runIndex,
       biteIndex: biteIndex,
       position: new THREE.Vector3(x, 0, z),
       velocity: new THREE.Vector3(),
@@ -885,52 +683,7 @@ function placeMonsters() {
       box: monsterBox,
     });
 
-    // Keep track of clones if you want to dispose them later:
     monsterClones.push(monsterClone);
-  });
-}
-
-/* 6½)  TREASURE SETUP ─────────────────────────────────── */
-function placeTreasures(loader) {
-  if (treasureSpots.length === 0) {
-    console.warn("No 'T' tiles in FIXED_LAYOUT – no treasures spawned.");
-    return;
-  }
-
-  // const tex = loader.load("textures/tres.png"); // or .jpg
-  // const geo = new THREE.BoxGeometry(1, 1, 1);
-  // const mat = new THREE.MeshPhongMaterial({ map: tex, shininess: 10 });
-  // const half = DUNGEON_SIZE >> 1;
-
-  // treasureSpots.forEach((cell) => {
-  //   const mesh = new THREE.Mesh(geo, mat.clone()); // clone so each can tint later
-  //   const x = (cell.c - half) * 2;
-  //   const z = (cell.r - half) * 2;
-  //   mesh.position.set(x, 0.5, z); // sits on the floor
-  //   scene.add(mesh);
-
-  //   treasures.push(mesh);
-  // });
-
-  const half = DUNGEON_SIZE >> 1;
-
-  treasureSpots.forEach((cell, idx) => {
-    // 1) Orange sphere
-    const sphere = new THREE.Mesh(dragonGeo, dragonMat.clone());
-    const x = (cell.c - half) * 2;
-    const z = (cell.r - half) * 2;
-    sphere.position.set(x, 0.5, z);
-    scene.add(sphere);
-
-    // 2) Decal projection on the “front” of the sphere:
-    const position = new THREE.Vector3(x, 0.5, z + 0.45); // just in front
-    const orientation = new THREE.Euler(0, 0, 0);
-    const size = new THREE.Vector3(0.8, 0.8, 0.8);
-    const decalGeo = new DecalGeometry(sphere, position, orientation, size);
-    const decalMesh = new THREE.Mesh(decalGeo, decalMat);
-    scene.add(decalMesh);
-
-    treasures.push(sphere);
   });
 }
 
@@ -940,28 +693,25 @@ function placeDragonBalls(decalTex) {
   tex.magFilter = THREE.LinearFilter;
   tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
 
+  const half = DUNGEON_SIZE >> 1;
+
   treasureSpots.forEach((cell) => {
     const sphere = new THREE.Mesh(
       dragonGeo,
       new THREE.MeshStandardMaterial({
-        map: tex, // ← apply your PNG as the color map
+        map: tex,
         metalness: 0,
         roughness: 0.7,
       })
     );
     sphere.position.set(
-      ((cell.c - DUNGEON_SIZE / 2) | 0) * 2,
+      ((cell.c - half) | 0) * 2,
       0.5,
-      ((cell.r - DUNGEON_SIZE / 2) | 0) * 2
+      ((cell.r - half) | 0) * 2
     );
-    sphere.rotation.set(
-      Math.PI / 2, // 45° around X
-      Math.PI / 2, // 90° around Y
-      0 // 0° around Z
-    );
+    sphere.rotation.set(Math.PI / 2, Math.PI / 2, 0);
     sphere.castShadow = true;
     sphere.receiveShadow = true;
-
     scene.add(sphere);
     treasures.push(sphere);
   });
@@ -971,16 +721,16 @@ function openTreasure(idx) {
   const coin = scene.userData.coinSound;
   if (coin) coin.play();
 
-  openedTreasures.add(idx); // mark as opened
-  treasures[idx].visible = false; // hide the treasure
-  const gold = 100; // random rewards (gold coins)
+  openedTreasures.add(idx);
+  treasures[idx].visible = false;
+  const gold = 100;
   goldCount += gold;
-  showPopup(`You get: Gold x${gold}！`); // show reward
+  coinsById[socket.id] = goldCount;
+  refreshRanking();
+  showPopup(`You get: Gold x${gold}!`);
   updateCoinDisplay();
 
-  if (socket) socket.emit("goldChanged", goldCount);
-  showPopup(`You get: Gold x${gold}！`);
-  updateCoinDisplay();
+  if (socket) socket.emit("goldChanged", { coins: goldCount });
 }
 
 function showPopup(msg) {
@@ -1001,72 +751,91 @@ function showPopup(msg) {
   setTimeout(() => popup.remove(), 2000);
 }
 
-// ─────────────────────────────────────────────────────────
-// 7) SOCKET.IO – MULTIPLAYER
-// ─────────────────────────────────────────────────────────
 function initSocketConnection() {
   socket = io();
+  socket.on('connect',()=>{
+    const name = window.pendingName || window.myPlayerName || 'Anon';
+    rememberPlayer(socket.id, name);
+    refreshNames();
+    socket.emit('setName', name);
+    console.log(`Connected as socket ${socket.id}, name ${name}`);
+  });
+
+  socket.on("timerUpdate", ({ remaining }) => {
+    timerDisplay.innerText = `Time: ${remaining}`;
+    if (!gameEnded && remaining <= 0) {
+      endGame(true);
+    }
+  });
+
+  socket.on("gamePaused", ({ paused }) => {
+    if (isSoloMode && !gameEnded) {
+      timerDisplay.innerText = timerDisplay.innerText.replace(" (Paused)", "");
+      if (paused) {
+        timerDisplay.innerText += " (Paused)";
+      }
+    }
+  });
+
+  socket.on("gameStarted", () => {
+    readyStatusDisplay.style.display = "none";
+    timerDisplay.innerText = timerDisplay.innerText.replace(" (Paused)", "");
+    gameEnded = false;
+    console.log('Game started, timer initialized');
+  });
+
+  socket.on("readyStatus", ({ readyCount, totalPlayers }) => {
+    isSoloMode = totalPlayers === 1;
+    if (isSoloMode) {
+      readyStatusDisplay.style.display = "none";
+    } else if (!gameEnded) {
+      readyStatusDisplay.style.display = "block";
+      readyStatusDisplay.innerText = mySlotIndex === 0
+        ? `${readyCount}/${totalPlayers} players ready`
+        : `Waiting for host... (${readyCount}/${totalPlayers} ready)`;
+    }
+    console.log(`Ready status: ${readyCount}/${totalPlayers}, isSoloMode: ${isSoloMode}, mySlot: ${mySlotIndex}`);
+  });
+
+  socket.on("gameOver", () => {
+    if (!gameEnded) endGame(true);
+  });
 
   socket.on("currentPlayers", (payload) => {
-    const list = Array.isArray(payload) // <--- NEW
-      ? payload //       NEW
-      : Object.values(payload); // <--- NEW
-
+    const list = Array.isArray(payload) ? payload : Object.values(payload);
     list.forEach((p) => {
+      if (p.name) rememberPlayer(p.id, p.name);
       if (p.id === socket.id) {
         mySlotIndex = p.slot;
-        console.log("Slot my index:", mySlotIndex);
         controls.getObject().position.copy(spawnSpots[mySlotIndex]);
+        console.log(`Assigned slot ${mySlotIndex} to self (socket ${socket.id})`);
 
         let proto = null;
+        if (mySlotIndex === 0) proto = avatarGLTF1;
+        if (mySlotIndex === 1) proto = avatarGLTF2;
+        if (mySlotIndex === 2) proto = avatarGLTF3;
+        if (mySlotIndex === 3) proto = avatarGLTF4;
 
-        if (mySlotIndex === 0) {
-          console.log("mySlotIndex0");
-          proto = avatarGLTF1;
-        }
-        if (mySlotIndex === 1) {
-          console.log("mySlotIndex1");
-          proto = avatarGLTF2;
-        }
-        if (mySlotIndex === 2) {
-          console.log("mySlotIndex2");
-          proto = avatarGLTF3;
-        }
-        if (mySlotIndex === 3) {
-          console.log("mySlotIndex3");
-          proto = avatarGLTF4;
-        }
-
-        console.log("proto:", proto);
         if (proto) {
           myAvatar = SkeletonUtils.clone(proto);
           myAvatar.userData.mixer = new THREE.AnimationMixer(myAvatar);
-
-          // Pick the right clip name by slot:
           let clipName = "";
-          if (mySlotIndex === 0) clipName = AVATAR_ANIM; // "CINEMA_4D___"
+          if (mySlotIndex === 0) clipName = AVATAR_ANIM;
           if (mySlotIndex === 1) clipName = AVATAR_ANIM2;
           if (mySlotIndex === 2) clipName = AVATAR_ANIM3;
           if (mySlotIndex === 3) clipName = AVATAR_ANIM4;
-
-          // Find that clip in the prototype’s list:
           const clips = proto.userData.clips;
           const clip = clips.find((c) => c.name === clipName);
           if (clip) {
             const action = myAvatar.userData.mixer.clipAction(clip);
             action.setLoop(THREE.LoopRepeat, Infinity);
             action.clampWhenFinished = true;
-            // start paused at the first frame:
             action.paused = true;
             action.time = 0;
             action.play();
             myAvatar.userData.action = action;
           } else {
-            console.warn(
-              "Clip not found on avatar:",
-              clipName,
-              clips.map((c) => c.name)
-            );
+            console.warn("Clip not found on avatar:", clipName, clips.map((c) => c.name));
           }
           scene.add(myAvatar);
         }
@@ -1074,20 +843,41 @@ function initSocketConnection() {
         addOtherPlayer(p);
       }
     });
+    refreshNames();
   });
-  // A newcomer joined after you: same logic
+
   socket.on("newPlayer", (pkt) => {
     const p = pkt.data ? { id: pkt.id, ...pkt.data } : pkt;
+    if (p.name) rememberPlayer(p.id, p.name);
+    refreshRanking();
     addOtherPlayer(p);
+    refreshNames();
   });
 
   socket.on("playerMoved", ({ id, data }) => {
     const p = players[id];
-    if (p) {
-      p.mesh.position.set(data.position.x, data.position.y, data.position.z);
-      p.mesh.rotation.y = data.rotation.y;
-      p.lastUpdate = performance.now();
+    if (!p) return;
+    const prevX = p.mesh.position.x;
+    const prevZ = p.mesh.position.z;
+    p.mesh.position.set(data.position.x, data.position.y, data.position.z);
+    p.mesh.rotation.y = data.rotation.y + Math.PI;
+    p.lastUpdate = performance.now();
+    const dx = data.position.x - prevX;
+    const dz = data.position.z - prevZ;
+    const moving = Math.hypot(dx, dz) > 0.001;
+    if (p.action) {
+      if (moving && p.action.paused) p.action.paused = false;
+      if (!moving && !p.action.paused) {
+        p.action.paused = true;
+        p.action.time = 0;
+      }
     }
+  });
+
+  socket.on('playerNameUpdated',({id,name})=>{
+    rememberPlayer(id, name);
+    refreshRanking();
+    refreshNames();
   });
 
   socket.on("removePlayer", (id) => {
@@ -1095,65 +885,82 @@ function initSocketConnection() {
       scene.remove(players[id].mesh);
       delete players[id];
     }
+    delete playerNames[id];
+    const i = joinOrder.indexOf(id);
+    if (i !== -1) joinOrder.splice(i, 1);
+    refreshNames();
+    refreshRanking();
   });
 
   socket.on("roomFull", () => {
     alert("This dungeon already has four adventurers. Try again later!");
   });
 
-  socket.on("playersRanking", (playersInfo) => {
-    updateRanking(playersInfo);
+  socket.on('goldChanged', ({ id, coins }) => {
+    coinsById[id] = coins ?? 0;
+    refreshRanking();
+  });
+
+  socket.on('playersRanking', (playersInfo=[]) => {
+    playersInfo.forEach(p => {
+      coinsById[p.id] = p.coins ?? 0;
+      if (p.name) rememberPlayer(p.id, p.name);
+    });
+    refreshRanking();
   });
 }
 
-// function addOtherPlayer(id, data) {
-//   const geo = new THREE.BoxGeometry(1, 1.8, 1);
-//   const mat = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
-//   const mesh = new THREE.Mesh(geo, mat);
-//   mesh.position.set(data.position.x, data.position.y, data.position.z);
-//   scene.add(mesh);
-//   players[id] = { mesh, lastUpdate: performance.now() };
-// }
-function addOtherPlayer({ id, slot, position, rotation = { y: 0 } }) {
-  let mesh;
-  console.log("Slot here:", slot);
+setInterval(() => {
+  if (!socket?.connected) return;
+  const p = controls.getObject().position;
+  const r = camera.rotation;
+  socket.emit("updateMovement", {
+    position: { x: p.x, y: p.y - playerHeight, z: p.z },
+    rotation: { x: r.x, y: r.y, z: r.z }
+  });
+}, 1000);
 
-  // ─── 1. Choose the graphic ──────────────────────────────────────────
+function addOtherPlayer({ id, slot, position, rotation = { y: 0 } }) {
+  let mesh, proto;
   if (slot === 0 && avatarGLTF1) {
     mesh = SkeletonUtils.clone(avatarGLTF1);
-    console.log("Avatar1.");
+    proto = avatarGLTF1;
   } else if (slot === 1 && avatarGLTF2) {
     mesh = SkeletonUtils.clone(avatarGLTF2);
-    console.log("Avatar2.");
+    proto = avatarGLTF2;
   } else if (slot === 2 && avatarGLTF3) {
     mesh = SkeletonUtils.clone(avatarGLTF3);
-    console.log("Avatar3.");
+    proto = avatarGLTF3;
   } else if (slot === 3 && avatarGLTF4) {
     mesh = SkeletonUtils.clone(avatarGLTF4);
-    console.log("Avatar4.");
-  } else {
-    // fallback: green cube
-    mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1.8, 1),
-      new THREE.MeshPhongMaterial({ color: 0x00ff00 })
-    );
+    proto = avatarGLTF4;
   }
-
-  // ─── 2. Place it in the world ───────────────────────────────────────
-  mesh.position.set(position.x, position.y, position.z);
-  mesh.rotation.y = rotation.y; // faces the right way
+  if (proto) {
+    const mixer = new THREE.AnimationMixer(mesh);
+    const clipNames = [AVATAR_ANIM, AVATAR_ANIM2, AVATAR_ANIM3, AVATAR_ANIM4];
+    const wantName = clipNames[slot] || proto.userData.clips[0].name;
+    const srcClip = proto.userData.clips.find(c => c.name === wantName) || proto.userData.clips[0];
+    const action = mixer.clipAction(srcClip);
+    action.setLoop(THREE.LoopRepeat, Infinity);
+    action.clampWhenFinished = true;
+    action.paused = true;
+    action.time = 0;
+    action.play();
+    mesh.userData.mixer = mixer;
+    mesh.userData.action = action;
+  }
+  mesh.position.set(position.x, position.y - playerHeight, position.z);
+  mesh.rotation.y = (rotation.y || 0) + Math.PI;
   scene.add(mesh);
-
-  // ─── 3. Register in our dictionary ──────────────────────────────────
   players[id] = {
     mesh,
+    mixer: mesh.userData.mixer || null,
+    action: mesh.userData.action || null,
     lastUpdate: performance.now(),
+    slot
   };
 }
 
-// ─────────────────────────────────────────────────────────
-// 8) INPUT
-// ─────────────────────────────────────────────────────────
 function onKeyDown(e) {
   if (playerDead) return;
   switch (e.code) {
@@ -1174,17 +981,13 @@ function onKeyDown(e) {
       moveRight = true;
       break;
     case "KeyE":
-      if (playerDead) return;
-      // open treasure
-      if (
-        nearestTreasureIndex !== null &&
-        !openedTreasures.has(nearestTreasureIndex)
-      ) {
+      if (nearestTreasureIndex !== null && !openedTreasures.has(nearestTreasureIndex)) {
         openTreasure(nearestTreasureIndex);
       }
       break;
   }
 }
+
 function onKeyUp(e) {
   if (playerDead) return;
   switch (e.code) {
@@ -1207,21 +1010,75 @@ function onKeyUp(e) {
   }
 }
 
-// ─────────────────────────────────────────────────────────
-// 9) MAIN ANIMATION LOOP
-// ─────────────────────────────────────────────────────────
+function updateMinimap() {
+  if (!minimapCtx) return;
+
+  const canvasWidth = minimapCanvas.width;
+  const canvasHeight = minimapCanvas.height;
+  const half = DUNGEON_SIZE >> 1;
+  const cellSize = canvasWidth / DUNGEON_SIZE;
+
+  minimapCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+  for (let r = 0; r < DUNGEON_SIZE; r++) {
+    for (let c = 0; c < DUNGEON_SIZE; c++) {
+      minimapCtx.fillStyle = dungeonMap[r][c] === 0 ? "#444" : "#888";
+      minimapCtx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+    }
+  }
+
+  treasureSpots.forEach((spot, idx) => {
+    if (!openedTreasures.has(idx)) {
+      minimapCtx.fillStyle = "#FFD700";
+      minimapCtx.beginPath();
+      minimapCtx.arc(
+        (spot.c + 0.5) * cellSize,
+        (spot.r + 0.5) * cellSize,
+        cellSize * 0.3,
+        0,
+        Math.PI * 2
+      );
+      minimapCtx.fill();
+    }
+  });
+
+  monsters.forEach((monster) => {
+    const x = (monster.position.x / 2 + half) * cellSize;
+    const z = (monster.position.z / 2 + half) * cellSize;
+    minimapCtx.fillStyle = "#FF5555";
+    minimapCtx.beginPath();
+    minimapCtx.arc(x, z, cellSize * 0.3, 0, Math.PI * 2);
+    minimapCtx.fill();
+  });
+
+  for (const id in players) {
+    const player = players[id];
+    const x = (player.mesh.position.x / 2 + half) * cellSize;
+    const z = (player.mesh.position.z / 2 + half) * cellSize;
+    minimapCtx.fillStyle = "#00FF00";
+    minimapCtx.beginPath();
+    minimapCtx.arc(x, z, cellSize * 0.4, 0, Math.PI * 2);
+    minimapCtx.fill();
+  }
+
+  const playerPos = controls.getObject().position;
+  const px = (playerPos.x / 2 + half) * cellSize;
+  const pz = (playerPos.z / 2 + half) * cellSize;
+  minimapCtx.fillStyle = "#FFFFFF";
+  minimapCtx.beginPath();
+  minimapCtx.arc(px, pz, cellSize * 0.4, 0, Math.PI * 2);
+  minimapCtx.fill();
+}
+
 function animate() {
   requestAnimationFrame(animate);
 
   const now = performance.now();
-  const dt = (now - prevTime) / 1000; // seconds since last frame
+  const dt = (now - prevTime) / 1000;
 
-  if (controls.isLocked) {
-    // is already game over
+  if (controls.isLocked && !gameEnded) {
     if (playerDead) {
-      // Optionally: Hide treasure hint when dead
       treasureHint.style.display = "none";
-      // Optionally: Set animation to idle, or pause it
       if (myAvatar && myAvatar.userData.action) {
         const action = myAvatar.userData.action;
         if (!action.paused) {
@@ -1229,15 +1086,14 @@ function animate() {
           action.time = 0;
         }
       }
-      // Don't process any movement or actions
       return;
     }
-    // Find the unopened treasure chest closest to the player
+
     nearestTreasureIndex = null;
-    let minDist = 2.0; // Maximum interactive distance (meters)
+    let minDist = 2.0;
     const playerPos = controls.getObject().position;
     treasures.forEach((treasure, idx) => {
-      if (openedTreasures.has(idx)) return; // ignore treasures that is already opened
+      if (openedTreasures.has(idx)) return;
       const dist = treasure.position.distanceTo(playerPos);
       if (dist < minDist) {
         minDist = dist;
@@ -1245,16 +1101,13 @@ function animate() {
       }
     });
 
-    // Show hint or instruction on the treasure
     if (nearestTreasureIndex !== null) {
       const chest = treasures[nearestTreasureIndex];
       let chestWorldPos = chest.position.clone();
       chestWorldPos.y += 1.0;
-
       let screenPos = chestWorldPos.clone().project(camera);
       let x = (screenPos.x * 0.5 + 0.5) * window.innerWidth;
       let y = (1 - (screenPos.y * 0.5 + 0.5)) * window.innerHeight;
-
       treasureHint.style.left = `${x}px`;
       treasureHint.style.top = `${y}px`;
       treasureHint.style.display = "";
@@ -1262,9 +1115,7 @@ function animate() {
       treasureHint.style.display = "none";
     }
 
-    /* 9.1 Constant-speed WASD -------------------------------------------- */ // ★ CHANGED
-    let dirX = 0,
-      dirZ = 0;
+    let dirX = 0, dirZ = 0;
     if (moveForward) dirZ -= 1;
     if (moveBackward) dirZ += 1;
     if (moveLeft) dirX -= 1;
@@ -1282,7 +1133,6 @@ function animate() {
     if (movement.lengthSq() > 0) {
       if (walk && !walk.isPlaying) walk.play();
       const nowSec = performance.now() / 1000;
-      // every 5–15 seconds randomly
       if (nowSec - scene.userData.lastRaptorTime > 5 + Math.random() * 10) {
         scene.userData.lastRaptorTime = nowSec;
         const r = new THREE.Audio(listener);
@@ -1296,11 +1146,9 @@ function animate() {
       if (walk && walk.isPlaying) walk.stop();
     }
 
-    /* 9.2 Capsule-vs-AABB collision -------------------------------------- */
     const curr = controls.getObject().position.clone();
     const cand = curr.clone().add(movement);
     const playerBox = makePlayerBox(cand);
-
     let blocked = false;
     for (const box of wallBoxes) {
       if (playerBox.intersectsBox(box)) {
@@ -1310,58 +1158,38 @@ function animate() {
     }
     if (!blocked) controls.getObject().position.copy(cand);
 
-    /* 9.3 Keep avatar glued to the floor --------------------------------- */
     controls.getObject().position.y = playerHeight;
 
-    /* 9.4 Flash-light follows + points forward  ---------------------------- */
     const head = controls.getObject();
     const dir = new THREE.Vector3();
     camera.getWorldDirection(dir);
-
     torch.position.copy(head.position).add(new THREE.Vector3(0, 0.2, 0));
     torch.target.position.copy(head.position).add(dir.multiplyScalar(2));
 
     if (myAvatar) {
-      // 1) Retrieve headY_in_local from userData
       const headY = myAvatar.userData.headY;
-
-      // 2) Compute the Y where the avatar’s origin (feet) must sit so head = camera Y:
-      //     feetY = camera.position.y – headY
       const avatarOriginY = camera.position.y - headY;
-
-      // 3) Snap avatar’s position.x/z to the camera’s x/z,
-      //    and set position.y = avatarOriginY
       myAvatar.position.set(
         camera.position.x,
         avatarOriginY,
         camera.position.z
       );
-
       const forward = new THREE.Vector3();
       camera.getWorldDirection(forward);
       forward.normalize();
-
-      const PUSH_FORWARD = -0.9; // adjust to test
+      const PUSH_FORWARD = -0.9;
       myAvatar.position.x += forward.x * PUSH_FORWARD;
       myAvatar.position.z += forward.z * PUSH_FORWARD;
-
-      // 4) Let avatar face exactly the same yaw as the camera:
-      //    camera.rotation.y is the yaw around the Y‐axis
       const cameraYaw = Math.atan2(forward.x, forward.z);
-
-      // 3) Add your original “model‐to‐world” yawOffset so the mesh’s +Z‐axis lines up correctly
       const yawOffset = myAvatar.userData.yawOffset || 0;
       myAvatar.rotation.y = cameraYaw + yawOffset;
-      //    (if your model needs an extra PI flip, do: camera.rotation.y + Math.PI)
     }
 
     if (myAvatar && myAvatar.userData.action) {
       const action = myAvatar.userData.action;
       if (movement.lengthSq() > 0) {
-        // player is moving → unpause animation
         if (action.paused) action.paused = false;
       } else {
-        // player stopped → pause and reset to first frame
         if (!action.paused) {
           action.paused = true;
           action.time = 0;
@@ -1373,55 +1201,38 @@ function animate() {
       myAvatar.userData.mixer.update(dt);
     }
 
-    /* 9.5 Monsters sight + movement  ------------------------------------ */
-    const camPosFull = controls.getObject().position.clone();
-
     monsters.forEach((m) => {
-      // 1) Compute the vector from monster to player (full 3D):
-      const dirToPlayerFull = camPosFull.clone().sub(m.position);
-
-      // 2) Zero out the Y component so we measure *horizontal* distance only:
+      const dirToPlayerFull = controls.getObject().position.clone().sub(m.position);
       dirToPlayerFull.y = 0;
       const horizDist = dirToPlayerFull.length();
-
-      // 3) LOS check (use full 3D ray origin + direction if you want),
-      //    but for the “catch” threshold we only compare horizontal:
       let canSee = false;
       if (horizDist < MONSTER_SIGHT) {
-        // Ray origin: up a little so we’re not shooting from the floor
         const rayOrigin = m.position.clone().add(new THREE.Vector3(0, 0.5, 0));
-        // Ray direction: normalized full‐3D direction toward player
-        const fullDir = camPosFull.clone().sub(m.position).normalize();
+        const fullDir = controls.getObject().position.clone().sub(m.position).normalize();
         raycaster.set(rayOrigin, fullDir);
         const hit = raycaster.intersectObjects(objects, true)[0];
-        // If nothing blocks within (full 3D) distance, it can see:
         canSee =
           !hit ||
-          hit.distance > camPosFull.clone().sub(m.position).length() - 0.3;
+          hit.distance > controls.getObject().position.clone().sub(m.position).length() - 0.3;
       }
       m.chasing = canSee;
 
       const wasChasing = m._wasChasing || false;
       if (!wasChasing && m.chasing) {
-        // just flipped from not‐chasing to chasing
         if (m.roar.isPlaying === false) m.roar.play();
       }
       m._wasChasing = m.chasing;
 
-      // 4) Decide “bite” vs “run” vs “idle” based on horizontal distance + LOS:
-      const CATCH_DIST = 0.9; // horizontal meters
-
+      const CATCH_DIST = 0.9;
       if (horizDist < CATCH_DIST) {
-        // ─── “BITE” state ───────────────────
         if (m.current !== m.biteIndex) {
           m.actions[m.current].fadeOut(0.2);
           m.actions[m.biteIndex].reset().fadeIn(0.2).play();
           m.current = m.biteIndex;
         }
-        // Attacked by monster
         if (!m.lastAttackTime) m.lastAttackTime = 0;
         const nowSec = now / 1000;
-        const attackCD = 1.0; // only 1 attack in 1 seconds
+        const attackCD = 1.0;
         if (nowSec - m.lastAttackTime > attackCD) {
           m.lastAttackTime = nowSec;
           if (playerLives > 0) {
@@ -1434,28 +1245,21 @@ function animate() {
           }
         }
       } else if (m.chasing) {
-        // ─── “RUN” state (player seen but not in bite range) ─────────────────
         if (m.current !== m.runIndex) {
           m.actions[m.current].fadeOut(0.2);
           m.actions[m.runIndex].reset().fadeIn(0.2).play();
           m.current = m.runIndex;
         }
-
-        // Movement + collision logic (unchanged, except use candPos on XZ)
         m.velocity
           .copy(dirToPlayerFull)
           .setY(0)
           .normalize()
           .multiplyScalar(MONSTER_SPEED);
         const candPos = m.position.clone().addScaledVector(m.velocity, dt);
-
-        // Temporarily place mesh at candPos to rebuild its bounding‐box:
         const oldPos = m.mesh.position.clone();
         m.mesh.position.copy(candPos);
         m.mesh.updateMatrixWorld(true);
         m.box.setFromObject(m.mesh).expandByScalar(0.05);
-
-        // Test that new box against every wallBox:
         let blocked = false;
         for (const w of wallBoxes) {
           if (m.box.intersectsBox(w)) {
@@ -1463,76 +1267,59 @@ function animate() {
             break;
           }
         }
-
         if (blocked) {
-          // If blocked, revert back:
           m.mesh.position.copy(oldPos);
           m.mesh.updateMatrixWorld(true);
           m.box.setFromObject(m.mesh).expandByScalar(0.05);
         } else {
-          // Otherwise commit the new position:
           m.position.copy(candPos);
           m.mesh.lookAt(
-            new THREE.Vector3(camPosFull.x, candPos.y, camPosFull.z)
+            new THREE.Vector3(controls.getObject().position.x, candPos.y, controls.getObject().position.z)
           );
         }
       } else {
-        // ─── “IDLE” state (player out of sight) ─────────────────────────
         if (m.current !== m.idleIndex) {
           m.actions[m.current].fadeOut(0.2);
           m.actions[m.idleIndex].reset().fadeIn(0.2).play();
           m.current = m.idleIndex;
         }
       }
-
-      // 5) Advance the mixer’s time:
       if (m.mixer) m.mixer.update(dt);
     });
 
     if (avatarMixer && avatarAction) {
       if (movement.lengthSq() > 0) {
-        // — player is moving → un-pause the animation
-        if (avatarAction.paused) {
-          avatarAction.paused = false;
-        }
+        if (avatarAction.paused) avatarAction.paused = false;
       } else {
-        // — player stopped → pause and reset to first frame (idle pose)
         if (!avatarAction.paused) {
           avatarAction.paused = true;
           avatarAction.time = 0;
         }
       }
-
-      // advance the mixer if un-paused (or it’ll stay at 0 if paused)
       avatarMixer.update(dt);
     }
 
-    /* 9.6 Broadcast movement (≈20 Hz) ------------------------------------ */
+    for (const id in players) {
+      const m = players[id].mixer;
+      if (m) m.update(dt);
+    }
+
     if (now % 50 < dt * 1000) {
       const p = controls.getObject().position;
       const r = camera.rotation;
       socket.emit("updateMovement", {
-        position: { x: p.x, y: p.y, z: p.z },
+        position: { x: p.x, y: p.y - playerHeight, z: p.z },
         rotation: { x: r.x, y: r.y, z: r.z },
       });
     }
-  }
 
-  /* 9.7 Purge stale remote players --------------------------------------- */
-  for (const id in players)
-    if (now - players[id].lastUpdate > 5000) {
-      scene.remove(players[id].mesh);
-      delete players[id];
-    }
+    updateMinimap();
+  }
 
   prevTime = now;
   renderer.render(scene, camera);
 }
 
-// ─────────────────────────────────────────────────────────
-// 10) PLAYER RANKING
-// ─────────────────────────────────────────────────────────
-// --- Add to your globals ---
 let rankingPanel = document.createElement("div");
 rankingPanel.style.position = "absolute";
 rankingPanel.style.right = "30px";
@@ -1547,58 +1334,52 @@ rankingPanel.style.fontSize = "18px";
 rankingPanel.innerHTML = "<b>🏆 Ranking</b><br/>";
 document.body.appendChild(rankingPanel);
 
-// --- Helper to update the ranking list ---
-function updateRanking(playersInfo) {
-  window.lastPlayersInfo = playersInfo.slice();
-  playersInfo.sort((a, b) => b.coins - a.coins);
-  rankingPanel.innerHTML = "<b>🏆 Ranking</b><br/><br/>";
-  // Sort by coins descending
-  playersInfo.sort((a, b) => b.coins - a.coins);
-  playersInfo.forEach((info, i) => {
-    // Use a character icon for the avatar (just an emoji for demo, or pick your own img)
-    let avatarIcon = "🧑";
-    if (info.slot === 0) avatarIcon = "🧙‍♂️";
-    if (info.slot === 1) avatarIcon = "🧑";
-    if (info.slot === 2) avatarIcon = "🦸‍♂️";
-    if (info.slot === 3) avatarIcon = "🎥";
-    let you = info.id === socket.id ? " <b>(You)</b>" : "";
+function refreshRanking() {
+  const rows = joinOrder.map(id => ({
+    id,
+    name: playerNames[id] || 'Anon',
+    slot: players[id]?.slot ?? (id === socket.id ? mySlotIndex : 0),
+    coins: coinsById[id] ?? 0
+  }));
+  rows.sort((a,b) => b.coins - a.coins);
+  rankingPanel.innerHTML = "<b>🏆 Ranking</b><br><br>";
+  rows.forEach(r => {
+    const icon =
+        r.slot === 0 ? "🧙‍♂️" :
+        r.slot === 1 ? "🧑" :
+        r.slot === 1 ? "🧑" :
+        r.slot === 2 ? "🦸‍♂️" :
+        r.slot === 3 ? "🎥" : "🧑";
+    const you = r.id === socket.id ? " <b>(You)</b>" : "";
     rankingPanel.innerHTML += `
-      <div style="margin-bottom:7px">
-        <span style="font-size:22px">${avatarIcon}</span> 
-        <span style="color:#FFD700;font-weight:bold"> — ${info.coins} 🪙
-        <span style="margin-left:10px">${you} </span></span>
+      <div style="margin-bottom:7px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:22px">${icon}</span>
+        <span style="flex:1">${r.name}</span>
+        <span style="color:#FFD700;font-weight:bold">${r.coins}</span>${you}
       </div>`;
   });
+  window.lastPlayersInfo = rows;
 }
 
-// ─────────────────────────────────────────────────────────
-// 11) RESIZE
-// ─────────────────────────────────────────────────────────
 function onWindowResize() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 }
 
-// ─────────────────────────────────────────────────────────
-// 12) Game Over (time's up // playerLives = 0)
-// ─────────────────────────────────────────────────────────
 function endGame(isTimeout = false) {
   if (gameEnded) return;
   gameEnded = true;
   playerDead = true;
+  refreshRanking();
   showDeathOverlay(isTimeout);
-  controls.unlock(); // unlock mouse to get back pointer
-  pauseGameTimer();
-  //  optional : lock controls, stop moving, restart button
+  controls.unlock();
 }
 
 function showDeathOverlay(isTimeout = false) {
-  // Remove any previous overlay
   let oldOverlay = document.getElementById("deathOverlay");
   if (oldOverlay) oldOverlay.remove();
 
-  // Create new overlay
   const overlay = document.createElement("div");
   overlay.id = "deathOverlay";
   overlay.style.position = "fixed";
@@ -1614,14 +1395,12 @@ function showDeathOverlay(isTimeout = false) {
   overlay.style.zIndex = "2000";
   overlay.style.backdropFilter = "blur(2px)";
 
-  // Main message block
   const msgBlock = document.createElement("div");
   msgBlock.style.display = "flex";
   msgBlock.style.flexDirection = "column";
   msgBlock.style.alignItems = "center";
   msgBlock.style.gap = "12px";
 
-  // Icon & Text
   const icon = document.createElement("div");
   icon.style.fontSize = "74px";
   icon.innerText = isTimeout ? "⏰" : "💀";
@@ -1632,14 +1411,12 @@ function showDeathOverlay(isTimeout = false) {
   msg.style.color = "#fff";
   msg.innerText = isTimeout ? "TIME'S UP!" : "GAME OVER!";
 
-  // Gold Collected
   const goldRow = document.createElement("div");
   goldRow.style.fontSize = "30px";
   goldRow.style.margin = "12px 0 4px";
   goldRow.style.color = "#fff";
-  goldRow.innerHTML = `Gold: <span style="color:#FFD700;font-weight:bold">${goldCount}</span> 🪙`;
+  goldRow.innerHTML = `Gold: <span style="color:#FFD700;font-weight:bold">${goldCount}</span>`;
 
-  // Ranking list
   const rankBlock = document.createElement("div");
   rankBlock.style.margin = "18px 0 0 0";
   rankBlock.style.padding = "10px 28px";
@@ -1649,14 +1426,8 @@ function showDeathOverlay(isTimeout = false) {
   rankBlock.style.fontSize = "20px";
   rankBlock.style.minWidth = "250px";
   rankBlock.style.boxShadow = "0 2px 12px #0008";
-  if (typeof getRankingHTML === "function") {
-    rankBlock.innerHTML = getRankingHTML();
-  } else {
-    // fallback simple
-    rankBlock.innerHTML = "<b>Ranking</b><br/>You: " + goldCount + " 🪙";
-  }
+  rankBlock.innerHTML = rankingPanel.innerHTML;
 
-  // Play Again button
   const btn = document.createElement("button");
   btn.innerText = "Play Again";
   btn.style.fontSize = "28px";
@@ -1668,7 +1439,6 @@ function showDeathOverlay(isTimeout = false) {
   btn.style.background = "#fff";
   btn.onclick = () => window.location.reload();
 
-  // Combine
   msgBlock.appendChild(icon);
   msgBlock.appendChild(msg);
   msgBlock.appendChild(goldRow);
@@ -1680,15 +1450,13 @@ function showDeathOverlay(isTimeout = false) {
 }
 
 function getRankingHTML() {
-  // If you have live ranking info stored, e.g. lastPlayersInfo
   if (!window.lastPlayersInfo)
-    return "<b>Ranking</b><br/>You: " + goldCount + " 🪙";
-  let playersInfo = window.lastPlayersInfo.slice(); // clone to avoid side effects
-  // Sort by coins DESC
+    return "<b>Ranking</b><br/>You: " + goldCount;
+  let playersInfo = window.lastPlayersInfo.slice();
   playersInfo.sort((a, b) => b.coins - a.coins);
-
   let html = "<b>🏆 Ranking</b><br/><br/>";
   playersInfo.forEach((info) => {
+    const name = (info.name || playerNames[info.id] || 'Anon');
     let avatarIcon = "🧑";
     if (info.slot === 0) avatarIcon = "🧙‍♂️";
     if (info.slot === 1) avatarIcon = "🧑";
@@ -1696,11 +1464,14 @@ function getRankingHTML() {
     if (info.slot === 3) avatarIcon = "🎥";
     let you = info.id === socket.id ? " <b>(You)</b>" : "";
     html += `
-      <div style="margin-bottom:7px">
-        <span style="font-size:22px">${avatarIcon}</span> 
-        <span style="color:#FFD700;font-weight:bold"> — ${info.coins} 🪙
-        <span style="margin-left:10px">${you} </span></span>
+      <div style="margin-bottom:7px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:22px">${avatarIcon}</span>
+        <span style="flex:1">${name}</span>
+        <span style="color:#FFD700;font-weight:bold">${info.coins}</span>${you}
       </div>`;
   });
   return html;
 }
+
+init();
+animate();
